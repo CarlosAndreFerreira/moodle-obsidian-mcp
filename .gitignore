@@ -1,0 +1,24 @@
+# Security: NEVER commit tokens, session cookies, or auth logs
+.env
+.env.*
+!.env.example
+*.log
+last_auth.log
+*token*
+!capture_mobile_token.py
+
+# Virtual environments & Python cache
+.venv/
+venv/
+ENV/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+
+# IDE & OS
+.vscode/
+.idea/
+.DS_Store
