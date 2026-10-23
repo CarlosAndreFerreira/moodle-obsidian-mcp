@@ -18,7 +18,7 @@ from dotenv import load_dotenv
 from markdownify import markdownify as md_convert
 from mcp.server.fastmcp import FastMCP
 
-load_dotenv()
+load_dotenv(Path(__file__).resolve().parent / ".env")
 
 mcp = FastMCP("Moodle UAb/UTAD Doctoral Suite & Obsidian MCP Server")
 
