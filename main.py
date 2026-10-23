@@ -858,6 +858,35 @@ def export_forum_discussions_to_obsidian(course_id: int, instance: str = "uab") 
     }
 
 
+def _count_my_forum_posts(forum_id: int, userid: int, instance: str = "uab") -> tuple[int, int]:
+    """Conta as discussões de um fórum e quantos posts (tópicos ou respostas) são do próprio aluno."""
+    discussions: list[dict[str, Any]] = []
+    page = 0
+    while True:
+        resp = _moodle_call(
+            "mod_forum_get_forum_discussions",
+            {"forumid": forum_id, "perpage": 50, "page": page},
+            instance=instance,
+        )
+        batch = resp.get("discussions", []) if isinstance(resp, dict) else []
+        discussions.extend(batch)
+        if len(batch) < 50:
+            break
+        page += 1
+
+    mine = 0
+    for disc in discussions:
+        posts_resp = _moodle_call(
+            "mod_forum_get_discussion_posts",
+            {"discussionid": disc.get("discussion")},
+            instance=instance,
+        )
+        for post in (posts_resp.get("posts", []) if isinstance(posts_resp, dict) else []):
+            if (post.get("author") or {}).get("id") == userid:
+                mine += 1
+    return len(discussions), mine
+
+
 @mcp.tool()
 def sync_doctoral_dashboard_to_obsidian(
     vault_dir: Optional[str] = None,
@@ -914,7 +943,8 @@ def sync_doctoral_dashboard_to_obsidian(
         "|---:|:---|:---:|:---:|:---:|:---|",
     ]
 
-    upcoming_assignments = []
+    upcoming_items: list[tuple[int, str, str, str, str, Any, str]] = []
+    pending_choices: list[tuple[str, str, str]] = []
     created_files = []
 
     for course in courses:
@@ -1005,7 +1035,54 @@ def sync_doctoral_dashboard_to_obsidian(
                     uc_lines.append(f"- **Enunciado / Descrição:**\n\n{intro}\n")
                 uc_lines.append("")
                 if duedate:
-                    upcoming_assignments.append((duedate, due_str, cname, aname, aid, sub_status))
+                    upcoming_items.append((duedate, due_str, cname, aname, "trabalho", aid, sub_status))
+
+        # Fóruns com prazo (frequentemente avaliados) — contam para a nota mas não são `mod_assign`
+        forums_resp = get_course_forums(cid, instance=instance)
+        dated_forums = [
+            f for f in (forums_resp if isinstance(forums_resp, list) else [])
+            if f.get("duedate")
+        ]
+        if dated_forums:
+            uc_lines.extend([
+                "",
+                "## 🏛 Fóruns com prazo (`mod_forum`)",
+                "",
+                "| Prazo | Fórum | Discussões | Posts meus | cmid |",
+                "|:---|:---|:---:|:---:|---:|",
+            ])
+            for f in dated_forums:
+                fdue = int(f.get("duedate") or 0)
+                fdue_str = datetime.fromtimestamp(fdue).strftime("%Y-%m-%d %H:%M")
+                n_disc, n_mine = _count_my_forum_posts(int(f["id"]), userid, instance=instance)
+                fstatus = f"{n_mine} post(s) meus" if n_mine else "sem participação"
+                uc_lines.append(
+                    f"| `{fdue_str}` | [{f.get('name')}]({base_url}/mod/forum/view.php?id={f.get('cmid')}) "
+                    f"| {n_disc} | {n_mine} | `{f.get('cmid')}` |"
+                )
+                upcoming_items.append((fdue, fdue_str, cname, f.get("name", "Fórum"), "fórum", f.get("cmid"), fstatus))
+
+        # Escolhas (`mod_choice`) ainda sem resposta — p.ex. opção de frequência de módulo
+        choices_resp = _moodle_call("mod_choice_get_choices_by_courses", {"courseids[0]": cid}, instance=instance)
+        for ch in (choices_resp.get("choices", []) if isinstance(choices_resp, dict) else []):
+            opts_resp = _moodle_call("mod_choice_get_choice_options", {"choiceid": ch.get("id")}, instance=instance)
+            options = opts_resp.get("options", []) if isinstance(opts_resp, dict) else []
+            if options and not any(o.get("checked") for o in options):
+                ch_url = f"{base_url}/mod/choice/view.php?id={ch.get('coursemodule')}"
+                pending_choices.append((cname, ch.get("name", "Escolha"), ch_url))
+                uc_lines.extend([
+                    "",
+                    f"> ⚠️ **Escolha por responder:** [{ch.get('name')}]({ch_url}) "
+                    f"({len(options)} opções disponíveis)",
+                ])
+
+        # Testes (`mod_quiz`) com data de fecho
+        quizzes_resp = _moodle_call("mod_quiz_get_quizzes_by_courses", {"courseids[0]": cid}, instance=instance)
+        for qz in (quizzes_resp.get("quizzes", []) if isinstance(quizzes_resp, dict) else []):
+            qclose = int(qz.get("timeclose") or 0)
+            if qclose:
+                qclose_str = datetime.fromtimestamp(qclose).strftime("%Y-%m-%d %H:%M")
+                upcoming_items.append((qclose, qclose_str, cname, qz.get("name", "Teste"), "teste", qz.get("coursemodule"), "—"))
 
         contents = get_course_contents(cid, instance=instance)
         uc_lines.extend(["", "## 📂 Conteúdos, Tópicos e Materiais da Disciplina", ""])
@@ -1039,15 +1116,32 @@ def sync_doctoral_dashboard_to_obsidian(
         if export_forums:
             export_forum_discussions_to_obsidian(cid, instance=instance)
 
+    now_ts = int(datetime.now().timestamp())
+    pending_states = {"new", "draft", "reopened", "sem participação", "—"}
     dashboard_lines.extend([
         "",
-        "## ⏰ Calendário de E-fólios e Trabalhos",
+        "## ⏰ Calendário de Prazos (trabalhos, fóruns avaliados e testes)",
         "",
-        "| Data Limite | Unidade Curricular | Trabalho / E-fólio | Estado | Assign ID |",
-        "|:---|:---|:---|:---:|---:|",
+        "| Data Limite | Tipo | Unidade Curricular | Atividade | Estado | ID |",
+        "|:---|:---:|:---|:---|:---:|---:|",
     ])
-    for _, due_str, cname, aname, aid, sub_status in sorted(upcoming_assignments, key=lambda x: x[0]):
-        dashboard_lines.append(f"| `{due_str}` | {cname} | **{aname}** | `{sub_status}` | `{aid}` |")
+    for due_ts, due_str, cname, aname, kind, ref_id, status in sorted(upcoming_items, key=lambda x: x[0]):
+        # Só sinaliza o que continua em falta: um prazo passado já entregue não é um alerta.
+        flag = " ⚠️" if due_ts < now_ts and status in pending_states else ""
+        dashboard_lines.append(
+            f"| `{due_str}`{flag} | {kind} | {cname} | **{aname}** | `{status}` | `{ref_id}` |"
+        )
+
+    if pending_choices:
+        dashboard_lines.extend([
+            "",
+            "## 🗳 Escolhas e inscrições por responder",
+            "",
+        ])
+        for cname, ch_name, ch_url in pending_choices:
+            dashboard_lines.append(f"- {cname} — [{ch_name}]({ch_url})")
+    dashboard_lines.append("")
+    dashboard_lines.append("_⚠️ = prazo já ultrapassado e atividade ainda em falta._")
 
     dashboard_file = target_dir / "Doutoramento - Painel Moodle.md"
     dashboard_file.write_text("\n".join(dashboard_lines) + "\n", encoding="utf-8")
