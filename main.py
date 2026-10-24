@@ -9,7 +9,7 @@ import sqlite3
 import tempfile
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Annotated, Any, Optional
 from urllib.parse import parse_qs, urlparse
 
 import pymupdf as fitz  # PyMuPDF
@@ -18,6 +18,8 @@ from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from markdownify import markdownify as md_convert
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
+from pydantic import Field
 
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
@@ -123,6 +125,66 @@ def _resolve_in_vault(candidate: Any) -> Path:
     return target
 
 
+# ==============================================================================
+# TIPOS DE PARÂMETRO REUTILIZÁVEIS
+#
+# Cada parâmetro leva uma descrição porque é ela — e não o nome — que o modelo lê
+# ao decidir o que passar. Em Moodle a confusão entre `cmid` (id do módulo de
+# curso) e o `id` da instância da atividade é a fonte de erro mais comum.
+#
+# Nenhum parâmetro usa `Optional[...]`: uma união `anyOf: [T, null]` na schema é
+# rejeitada ou tratada de forma inconsistente por parte dos providers de LLM.
+# Em vez disso, cada parâmetro opcional tem uma sentinela do mesmo tipo
+# (`0` para ids, `""` para texto), documentada na descrição.
+# ==============================================================================
+
+Inst = Annotated[
+    str,
+    Field(description="Instância Moodle a usar: 'uab' (Universidade Aberta) ou 'utad'."),
+]
+CourseId = Annotated[
+    int,
+    Field(description="ID numérico da disciplina/UC (campo `id` de get_enrolled_courses)."),
+]
+UserId = Annotated[
+    int,
+    Field(description="ID do utilizador no Moodle; 0 (omissão) usa o aluno autenticado."),
+]
+
+
+def _ann(
+    title: str,
+    *,
+    read_only: bool = False,
+    destructive: bool = False,
+    idempotent: bool = True,
+) -> ToolAnnotations:
+    """Constrói as anotações de uma ferramenta para os clientes MCP.
+
+    Os clientes usam estes sinais para decidir o que podem auto-aprovar e o que
+    exige confirmação humana. São interpretados pelo cliente, não pelo provider
+    de LLM, pelo que funcionam igualmente em qualquer modelo.
+
+    Args:
+        title: Nome legível para a interface do cliente.
+        read_only: True se a ferramenta não altera nada (nem no Moodle nem em disco).
+        destructive: True se pode sobrescrever ou tornar irreversível algo existente.
+        idempotent: False se repetir a chamada cria duplicados.
+
+    Returns:
+        O objeto `ToolAnnotations` a passar a `@mcp.tool(annotations=...)`.
+        `openWorldHint` é sempre True: todas as ferramentas falam com um servidor
+        Moodle remoto.
+    """
+    return ToolAnnotations(
+        title=title,
+        readOnlyHint=read_only,
+        destructiveHint=destructive,
+        idempotentHint=idempotent,
+        openWorldHint=True,
+    )
+
+
 def _resolve_target(instance: str = "uab") -> tuple[str, str]:
     """Resolve URL and Token for 'uab' or 'utad'."""
     if instance.lower() == "utad":
@@ -218,11 +280,11 @@ def _update_env_var(key: str, value: str) -> str:
 # ==============================================================================
 
 
-@mcp.tool()
+@mcp.tool(annotations=_ann("Guardar token do Moodle", destructive=True))
 def set_moodle_token(
-    token: str,
-    instance: str = "uab",
-    moodle_url: Optional[str] = None,
+    token: Annotated[str, Field(description="O `wstoken` do Web Service do Moodle (32 caracteres hexadecimais).")],
+    instance: Inst = "uab",
+    moodle_url: Annotated[str, Field(description="URL base alternativo a gravar para esta instância; vazio mantém o atual.")] = "",
 ) -> dict[str, Any]:
     """Guarda o token Moodle no `.env` e valida logo a ligação ao site.
 
@@ -265,8 +327,11 @@ def set_moodle_token(
     }
 
 
-@mcp.tool()
-def decode_mobile_launch_token(launch_url_or_base64: str, instance: str = "uab") -> dict[str, Any]:
+@mcp.tool(annotations=_ann("Capturar token via moodlemobile://", destructive=True))
+def decode_mobile_launch_token(
+    launch_url_or_base64: Annotated[str, Field(description="O URL `moodlemobile://token=...` completo, ou apenas a parte em Base64.")],
+    instance: Inst = "uab",
+) -> dict[str, Any]:
     """Descodifica um URL `moodlemobile://token=...` e guarda o `wstoken` no `.env`.
 
     O URL é obtido em
@@ -312,10 +377,10 @@ def decode_mobile_launch_token(launch_url_or_base64: str, instance: str = "uab")
     }
 
 
-@mcp.tool()
+@mcp.tool(annotations=_ann("Extrair token de um cookie", destructive=True))
 def extract_token_from_session_cookie(
-    moodle_session_cookie: str,
-    instance: str = "uab",
+    moodle_session_cookie: Annotated[str, Field(description="Valor do cookie `MoodleSession` de uma sessão de browser ativa.")],
+    instance: Inst = "uab",
 ) -> dict[str, Any]:
     """Extrai o token do Moodle a partir de um cookie `MoodleSession` ativo.
 
@@ -371,11 +436,11 @@ def extract_token_from_session_cookie(
     }
 
 
-@mcp.tool()
+@mcp.tool(annotations=_ann("Chamar função arbitrária da API", destructive=True, idempotent=False))
 def call_any_moodle_wsfunction(
-    wsfunction: str,
-    params_json: str = "{}",
-    instance: str = "uab",
+    wsfunction: Annotated[str, Field(description="Nome da função de Web Service, ex.: `core_user_get_users_by_field`.")],
+    params_json: Annotated[str, Field(description="Parâmetros em JSON. Arrays usam a sintaxe do Moodle, ex.: {'courseids[0]': 42}.")] = "{}",
+    instance: Inst = "uab",
 ) -> Any:
     """
     Ferramenta universal de baixo nível: permite chamar QUALQUER função da API Web Services do Moodle
@@ -390,14 +455,19 @@ def call_any_moodle_wsfunction(
 # ==============================================================================
 
 
-@mcp.tool()
-def get_site_info(instance: str = "uab"):
+@mcp.tool(annotations=_ann("Ver informação do site", read_only=True))
+def get_site_info(
+    instance: Inst = "uab",
+):
     """Obtém informação do site Moodle, versão, funções ativas na API e dados do aluno autenticado."""
     return _moodle_call("core_webservice_get_site_info", instance=instance)
 
 
-@mcp.tool()
-def get_enrolled_courses(classification: str = "all", instance: str = "uab"):
+@mcp.tool(annotations=_ann("Listar disciplinas inscritas", read_only=True))
+def get_enrolled_courses(
+    classification: Annotated[str, Field(description="Filtro temporal: 'all', 'inprogress', 'future', 'past' ou 'favourites'.")] = "all",
+    instance: Inst = "uab",
+):
     """
     Lista todas as disciplinas/unidades curriculares em que o aluno está inscrito.
     `classification` pode ser: 'all', 'inprogress', 'future', 'past', 'favourites'.
@@ -413,14 +483,20 @@ def get_enrolled_courses(classification: str = "all", instance: str = "uab"):
     return res
 
 
-@mcp.tool()
-def get_course_contents(course_id: int, instance: str = "uab"):
+@mcp.tool(annotations=_ann("Ver conteúdos da disciplina", read_only=True))
+def get_course_contents(
+    course_id: CourseId,
+    instance: Inst = "uab",
+):
     """Obtém todos os tópicos, módulos, recursos, ficheiros, pastas e URLs de uma unidade curricular."""
     return _moodle_call("core_course_get_contents", {"courseid": course_id}, instance=instance)
 
 
-@mcp.tool()
-def get_course_pages_and_books(course_id: int, instance: str = "uab") -> dict[str, Any]:
+@mcp.tool(annotations=_ann("Ver páginas e livros", read_only=True))
+def get_course_pages_and_books(
+    course_id: CourseId,
+    instance: Inst = "uab",
+) -> dict[str, Any]:
     """
     Obtém todas as Páginas HTML (`mod_page`), Pastas (`mod_folder`), Recursos (`mod_resource`)
     e Livros (`mod_book` — muito usados nos Contratos de Aprendizagem e Guias da UAb!) de uma disciplina.
@@ -437,8 +513,11 @@ def get_course_pages_and_books(course_id: int, instance: str = "uab") -> dict[st
     }
 
 
-@mcp.tool()
-def get_activities_completion_status(course_id: int, instance: str = "uab"):
+@mcp.tool(annotations=_ann("Ver progresso de atividades", read_only=True))
+def get_activities_completion_status(
+    course_id: CourseId,
+    instance: Inst = "uab",
+):
     """Obtém o estado de conclusão (checkboxes de progresso) de todas as atividades de uma disciplina."""
     uid = _get_current_user_id(instance=instance)
     return _moodle_call(
@@ -448,8 +527,12 @@ def get_activities_completion_status(course_id: int, instance: str = "uab"):
     )
 
 
-@mcp.tool()
-def toggle_activity_completion(cmid: int, completed: bool = True, instance: str = "uab"):
+@mcp.tool(annotations=_ann("Marcar atividade como concluída"))
+def toggle_activity_completion(
+    cmid: Annotated[int, Field(description="ID do módulo de curso (cmid) — o campo `id` dos módulos em get_course_contents, NÃO o `instance`.")],
+    completed: Annotated[bool, Field(description="True marca a atividade como concluída; False desmarca.")] = True,
+    instance: Inst = "uab",
+):
     """
     Marca ou desmarca manualmente uma atividade/recurso da disciplina como concluída (`core_completion_update_activity_completion_status_manually`).
     `cmid` é o ID do módulo do curso (course module id).
@@ -461,8 +544,12 @@ def toggle_activity_completion(cmid: int, completed: bool = True, instance: str 
     )
 
 
-@mcp.tool()
-def get_course_participants(course_id: int, limit: int = 100, instance: str = "uab"):
+@mcp.tool(annotations=_ann("Listar participantes", read_only=True))
+def get_course_participants(
+    course_id: CourseId,
+    limit: Annotated[int, Field(description="Número máximo de participantes a devolver.")] = 100,
+    instance: Inst = "uab",
+):
     """
     Lista os participantes de uma disciplina (professores, tutores e colegas de doutoramento).
     Útil para identificar o ID do professor ou colegas de grupo.
@@ -483,12 +570,12 @@ def get_course_participants(course_id: int, limit: int = 100, instance: str = "u
 # ==============================================================================
 
 
-@mcp.tool()
+@mcp.tool(annotations=_ann("Descarregar ficheiro para o Vault"))
 def download_moodle_file(
-    file_url: str,
-    dest_path: str,
-    extract_pdf_to_markdown: bool = True,
-    instance: str = "uab",
+    file_url: Annotated[str, Field(description="O `fileurl` devolvido pela API do Moodle, sem token (é acrescentado pelo servidor).")],
+    dest_path: Annotated[str, Field(description="Destino do ficheiro. Um caminho relativo resolve a partir da raiz do Vault; tem de ficar dentro do Vault.")],
+    extract_pdf_to_markdown: Annotated[bool, Field(description="Se True e o ficheiro for PDF, extrai o texto para um `.md` irmão.")] = True,
+    instance: Inst = "uab",
 ) -> dict[str, Any]:
     """Descarrega um ficheiro autenticado do Moodle para dentro do Vault.
 
@@ -558,11 +645,11 @@ def download_moodle_file(
     return result
 
 
-@mcp.tool()
+@mcp.tool(annotations=_ann("Descarregar materiais da UC"))
 def download_all_course_materials_to_obsidian(
-    course_id: int,
-    extract_pdfs: bool = True,
-    instance: str = "uab",
+    course_id: CourseId,
+    extract_pdfs: Annotated[bool, Field(description="Se converte cada PDF descarregado num `.md` pesquisável no Obsidian.")] = True,
+    instance: Inst = "uab",
 ) -> dict[str, Any]:
     """
     Descarrega TODOS os ficheiros (PDFs, enunciados de e-fólios, slides, textos de apoio e páginas HTML)
@@ -663,16 +750,22 @@ def download_all_course_materials_to_obsidian(
 # ==============================================================================
 
 
-@mcp.tool()
-def get_assignments(instance: str = "uab"):
+@mcp.tool(annotations=_ann("Listar trabalhos e e-fólios", read_only=True))
+def get_assignments(
+    instance: Inst = "uab",
+):
     """Obtém todos os trabalhos / e-fólios / p-fólios, descrições, ficheiros de enunciado e prazos de entrega."""
     return _moodle_call("mod_assign_get_assignments", instance=instance)
 
 
-@mcp.tool()
-def get_assignment_submission(assign_id: int, user_id: Optional[int] = None, instance: str = "uab"):
+@mcp.tool(annotations=_ann("Ver estado de uma submissão", read_only=True))
+def get_assignment_submission(
+    assign_id: Annotated[int, Field(description="ID do trabalho — o campo `id` de get_assignments, NÃO o cmid.")],
+    user_id: UserId = 0,
+    instance: Inst = "uab",
+):
     """Obtém o estado detalhado da submissão, nota, rubrica e comentários de feedback de um trabalho/e-fólio."""
-    uid = user_id if user_id is not None else _get_current_user_id(instance=instance)
+    uid = user_id or _get_current_user_id(instance=instance)
     return _moodle_call(
         "mod_assign_get_submission_status",
         {"assignid": assign_id, "userid": uid},
@@ -680,10 +773,14 @@ def get_assignment_submission(assign_id: int, user_id: Optional[int] = None, ins
     )
 
 
-@mcp.tool()
-def get_course_grades(course_id: int, user_id: Optional[int] = None, instance: str = "uab"):
+@mcp.tool(annotations=_ann("Ver notas da disciplina", read_only=True))
+def get_course_grades(
+    course_id: CourseId,
+    user_id: UserId = 0,
+    instance: Inst = "uab",
+):
     """Obtém todas as notas e itens de avaliação (e-fólios A/B/C, Global, p-fólio) de uma disciplina específica."""
-    uid = user_id if user_id is not None else _get_current_user_id(instance=instance)
+    uid = user_id or _get_current_user_id(instance=instance)
     return _moodle_call(
         "gradereport_user_get_grade_items",
         {"courseid": course_id, "userid": uid},
@@ -691,21 +788,30 @@ def get_course_grades(course_id: int, user_id: Optional[int] = None, instance: s
     )
 
 
-@mcp.tool()
-def get_all_grades_overview(instance: str = "uab"):
+@mcp.tool(annotations=_ann("Ver resumo de todas as notas", read_only=True))
+def get_all_grades_overview(
+    instance: Inst = "uab",
+):
     """Obtém o resumo de notas finais/atuais de todas as disciplinas em que o aluno está inscrito."""
     return _moodle_call("gradereport_overview_get_course_grades", instance=instance)
 
 
-@mcp.tool()
-def get_course_quizzes(course_id: int, instance: str = "uab"):
+@mcp.tool(annotations=_ann("Listar testes", read_only=True))
+def get_course_quizzes(
+    course_id: CourseId,
+    instance: Inst = "uab",
+):
     """Lista todos os questionários / testes online (`mod_quiz`) de uma disciplina e as tuas tentativas/notas."""
     quizzes = _moodle_call("mod_quiz_get_quizzes_by_courses", {"courseids[0]": course_id}, instance=instance)
     return quizzes
 
 
-@mcp.tool()
-def upload_file_to_draft(file_path: str, item_id: int = 0, instance: str = "uab") -> Any:
+@mcp.tool(annotations=_ann("Enviar ficheiro para rascunho", idempotent=False))
+def upload_file_to_draft(
+    file_path: Annotated[str, Field(description="Ficheiro a enviar, dentro do Vault. Um caminho relativo resolve a partir da raiz do Vault.")],
+    item_id: Annotated[int, Field(description="`itemid` de um draft existente a reutilizar; 0 cria um novo.")] = 0,
+    instance: Inst = "uab",
+) -> Any:
     """Envia um ficheiro do Vault para a área de rascunho (draft area) do Moodle.
 
     `file_path` tem de estar dentro de `OBSIDIAN_VAULT_DIR`: o upload sai da
@@ -743,13 +849,13 @@ def upload_file_to_draft(file_path: str, item_id: int = 0, instance: str = "uab"
     return response.json()
 
 
-@mcp.tool()
+@mcp.tool(annotations=_ann("Submeter trabalho / e-fólio", destructive=True, idempotent=False))
 def save_assignment_submission(
-    assign_id: int,
-    online_text_html: Optional[str] = None,
-    files_draft_item_id: Optional[int] = None,
-    submit_for_grading: bool = False,
-    instance: str = "uab",
+    assign_id: Annotated[int, Field(description="ID do trabalho (campo `id` de get_assignments).")],
+    online_text_html: Annotated[str, Field(description="Texto da submissão em HTML (plugin 'online text'); vazio não envia texto.")] = "",
+    files_draft_item_id: Annotated[int, Field(description="`itemid` devolvido por upload_file_to_draft; 0 submete sem ficheiros.")] = 0,
+    submit_for_grading: Annotated[bool, Field(description="True entrega definitivamente para avaliação e é IRREVERSÍVEL. False apenas guarda o rascunho.")] = False,
+    instance: Inst = "uab",
 ) -> dict[str, Any]:
     """
     Guarda um trabalho/e-fólio no Moodle (texto online e/ou ficheiros previamente carregados com `upload_file_to_draft`).
@@ -757,11 +863,11 @@ def save_assignment_submission(
     se `submit_for_grading=True`, lacra e submete em definitivo para avaliação.
     """
     params: dict[str, Any] = {"assignmentid": assign_id}
-    if online_text_html is not None:
+    if online_text_html:
         params["plugindata[onlinetext_editor][text]"] = online_text_html
         params["plugindata[onlinetext_editor][format]"] = 1
         params["plugindata[onlinetext_editor][itemid]"] = 0
-    if files_draft_item_id is not None:
+    if files_draft_item_id:
         params["plugindata[files_filemanager]"] = files_draft_item_id
 
     save_res = _moodle_call("mod_assign_save_submission", params, instance=instance)
@@ -778,13 +884,13 @@ def save_assignment_submission(
     return result
 
 
-@mcp.tool()
+@mcp.tool(annotations=_ann("Comentar numa submissão", idempotent=False))
 def add_submission_comment(
-    context_id: int,
-    item_id: int,
-    content: str,
-    area: str = "submission_comments",
-    instance: str = "uab",
+    context_id: Annotated[int, Field(description="ID de contexto do módulo do trabalho no Moodle.")],
+    item_id: Annotated[int, Field(description="ID do item a comentar (normalmente o id da submissão).")],
+    content: Annotated[str, Field(description="Texto do comentário.")],
+    area: Annotated[str, Field(description="Área de comentários do Moodle; raramente precisa de ser alterada.")] = "submission_comments",
+    instance: Inst = "uab",
 ):
     """
     Adiciona um comentário oficial num trabalho/submissão (ex.: observação para o professor na entrega de um e-fólio).
@@ -810,26 +916,39 @@ def add_submission_comment(
 # ==============================================================================
 
 
-@mcp.tool()
-def get_course_forums(course_id: int, instance: str = "uab"):
+@mcp.tool(annotations=_ann("Listar fóruns", read_only=True))
+def get_course_forums(
+    course_id: CourseId,
+    instance: Inst = "uab",
+):
     """Lista todos os fóruns (Fórum de Notícias, Fórum Central, Fóruns de Tópicos/Grupos) de uma disciplina."""
     return _moodle_call("mod_forum_get_forums_by_courses", {"courseids[0]": course_id}, instance=instance)
 
 
-@mcp.tool()
-def get_forum_discussions(forum_id: int, instance: str = "uab"):
+@mcp.tool(annotations=_ann("Listar tópicos de um fórum", read_only=True))
+def get_forum_discussions(
+    forum_id: Annotated[int, Field(description="ID do fórum (campo `id` de get_course_forums).")],
+    instance: Inst = "uab",
+):
     """Lista todos os tópicos de discussão dentro de um fórum específico."""
     return _moodle_call("mod_forum_get_forum_discussions", {"forumid": forum_id}, instance=instance)
 
 
-@mcp.tool()
-def get_discussion_posts(discussion_id: int, instance: str = "uab"):
+@mcp.tool(annotations=_ann("Ler posts de um tópico", read_only=True))
+def get_discussion_posts(
+    discussion_id: Annotated[int, Field(description="ID do tópico (campo `discussion` de get_forum_discussions).")],
+    instance: Inst = "uab",
+):
     """Obtém todas as mensagens/respostas dentro de um tópico de discussão de um fórum."""
     return _moodle_call("mod_forum_get_discussion_posts", {"discussionid": discussion_id}, instance=instance)
 
 
-@mcp.tool()
-def search_all_course_forums(course_id: int, query: str, instance: str = "uab") -> dict[str, Any]:
+@mcp.tool(annotations=_ann("Procurar nos fóruns", read_only=True))
+def search_all_course_forums(
+    course_id: CourseId,
+    query: Annotated[str, Field(description="Texto a procurar no assunto e no corpo dos posts, sem distinção de maiúsculas.")],
+    instance: Inst = "uab",
+) -> dict[str, Any]:
     """
     Pesquisa uma palavra-chave ou tema em TODOS os fóruns e posts de uma disciplina da UAb!
     Ideal para encontrar o que o professor ou colegas já responderam sobre um e-fólio ou artigo.
@@ -866,13 +985,13 @@ def search_all_course_forums(course_id: int, query: str, instance: str = "uab") 
     return {"query": query, "course_id": course_id, "matches_count": len(matches), "matches": matches}
 
 
-@mcp.tool()
+@mcp.tool(annotations=_ann("Responder num fórum", idempotent=False))
 def reply_to_forum_post(
-    post_id: int,
-    subject: str,
-    message_html: str,
-    attachments_draft_itemid: Optional[int] = None,
-    instance: str = "uab",
+    post_id: Annotated[int, Field(description="ID do post a que se responde (campo `id` de get_discussion_posts).")],
+    subject: Annotated[str, Field(description="Assunto da resposta.")],
+    message_html: Annotated[str, Field(description="Corpo da resposta em HTML.")],
+    attachments_draft_itemid: Annotated[int, Field(description="`itemid` de upload_file_to_draft para anexos; 0 não anexa nada.")] = 0,
+    instance: Inst = "uab",
 ):
     """
     Envia uma resposta/comentário para um post de fórum (como aluno), com suporte opcional para anexo
@@ -883,20 +1002,20 @@ def reply_to_forum_post(
         "subject": subject,
         "message": message_html,
     }
-    if attachments_draft_itemid is not None:
+    if attachments_draft_itemid:
         params["options[0][name]"] = "attachmentsid"
         params["options[0][value]"] = attachments_draft_itemid
     return _moodle_call("mod_forum_add_discussion_post", params, instance=instance)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_ann("Criar tópico num fórum", idempotent=False))
 def create_forum_discussion(
-    forum_id: int,
-    subject: str,
-    message_html: str,
-    group_id: int = -1,
-    attachments_draft_itemid: Optional[int] = None,
-    instance: str = "uab",
+    forum_id: Annotated[int, Field(description="ID do fórum onde criar o tópico (campo `id` de get_course_forums).")],
+    subject: Annotated[str, Field(description="Assunto do novo tópico.")],
+    message_html: Annotated[str, Field(description="Corpo da mensagem inicial em HTML.")],
+    group_id: Annotated[int, Field(description="ID do grupo; -1 publica para todos os grupos.")] = -1,
+    attachments_draft_itemid: Annotated[int, Field(description="`itemid` de upload_file_to_draft para anexos; 0 não anexa nada.")] = 0,
+    instance: Inst = "uab",
 ):
     """Cria um novo tópico de discussão num fórum da disciplina (com suporte opcional a anexo e grupo)."""
     params: dict[str, Any] = {
@@ -905,14 +1024,18 @@ def create_forum_discussion(
         "message": message_html,
         "groupid": group_id,
     }
-    if attachments_draft_itemid is not None:
+    if attachments_draft_itemid:
         params["options[0][name]"] = "attachmentsid"
         params["options[0][value]"] = attachments_draft_itemid
     return _moodle_call("mod_forum_add_discussion", params, instance=instance)
 
 
-@mcp.tool()
-def send_instant_message(to_user_id: int, text: str, instance: str = "uab"):
+@mcp.tool(annotations=_ann("Enviar mensagem instantânea", idempotent=False))
+def send_instant_message(
+    to_user_id: Annotated[int, Field(description="ID do destinatário (campo `id` de get_course_participants).")],
+    text: Annotated[str, Field(description="Texto da mensagem a enviar.")],
+    instance: Inst = "uab",
+):
     """Envia uma mensagem privada direta no Moodle para um professor ou colega de doutoramento (`core_message_send_instant_messages`)."""
     return _moodle_call(
         "core_message_send_instant_messages",
@@ -925,10 +1048,13 @@ def send_instant_message(to_user_id: int, text: str, instance: str = "uab"):
     )
 
 
-@mcp.tool()
-def get_calendar_events(course_id: Optional[int] = None, instance: str = "uab"):
+@mcp.tool(annotations=_ann("Ver eventos e prazos", read_only=True))
+def get_calendar_events(
+    course_id: Annotated[int, Field(description="Limitar a uma disciplina; 0 devolve os eventos de todas as disciplinas inscritas.")] = 0,
+    instance: Inst = "uab",
+):
     """Obtém os próximos eventos de calendário e prazos de entrega."""
-    if course_id is not None:
+    if course_id:
         current_timestamp = int(datetime.now().timestamp())
         return _moodle_call(
             "core_calendar_get_calendar_events",
@@ -941,8 +1067,11 @@ def get_calendar_events(course_id: Optional[int] = None, instance: str = "uab"):
     return _moodle_call("core_calendar_get_calendar_upcoming_view", instance=instance)
 
 
-@mcp.tool()
-def get_messages(read: bool = False, instance: str = "uab"):
+@mcp.tool(annotations=_ann("Ler mensagens", read_only=True))
+def get_messages(
+    read: Annotated[bool, Field(description="True devolve as mensagens já lidas; False devolve as não lidas.")] = False,
+    instance: Inst = "uab",
+):
     """Obtém notificações e mensagens recebidas pelo aluno."""
     uid = _get_current_user_id(instance=instance)
     return _moodle_call(
@@ -961,8 +1090,11 @@ def get_messages(read: bool = False, instance: str = "uab"):
 # ==============================================================================
 
 
-@mcp.tool()
-def export_forum_discussions_to_obsidian(course_id: int, instance: str = "uab") -> dict[str, Any]:
+@mcp.tool(annotations=_ann("Exportar fóruns para o Vault"))
+def export_forum_discussions_to_obsidian(
+    course_id: CourseId,
+    instance: Inst = "uab",
+) -> dict[str, Any]:
     """
     Exporta todos os fóruns e debates de uma disciplina para ficheiros Markdown organizados no Obsidian
     (`<Vault>/Unidades Curriculares/<UC>/Foruns/`).
@@ -1067,12 +1199,12 @@ def _count_my_forum_posts(forum_id: int, userid: int, instance: str = "uab") -> 
     return len(discussions), mine
 
 
-@mcp.tool()
+@mcp.tool(annotations=_ann("Sincronizar painel no Obsidian"))
 def sync_doctoral_dashboard_to_obsidian(
-    vault_dir: Optional[str] = None,
-    download_materials: bool = False,
-    export_forums: bool = False,
-    instance: str = "uab",
+    vault_dir: Annotated[str, Field(description="Subdiretório alternativo dentro do Vault; vazio escreve na raiz do Vault.")] = "",
+    download_materials: Annotated[bool, Field(description="Se descarrega também todos os PDFs e materiais de cada UC.")] = False,
+    export_forums: Annotated[bool, Field(description="Se exporta também todos os tópicos dos fóruns para Markdown.")] = False,
+    instance: Inst = "uab",
 ) -> dict[str, Any]:
     """
     Sincroniza todas as disciplinas inscritas, notas detalhadas, estado de submissão dos e-fólios/p-fólios,
