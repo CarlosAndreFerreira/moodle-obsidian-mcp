@@ -250,7 +250,7 @@ mas a AGPL é viral e obrigaria o teu código a ser AGPL também.
 (`pip install moodle-mcp[pdf]`) ou trocar por `pypdf` (BSD). Para uso pessoal, não é
 problema — mas decide antes de publicar, não depois.
 
-### 26. `instance="uab"` / `"utad"` está codificado
+### 26. `instance="uab"` / `"utad"` está codificado — ✅ FEITO
 Os literais aparecem em todas as 32 assinaturas e em `_resolve_target`. Nenhuma outra
 universidade pode usar isto sem editar o código — e o nome "uab" não significa nada
 para um modelo a ler a schema.
@@ -690,3 +690,85 @@ temporário, pelo que a configuração real não foi tocada.
 * **9** — `--transport streamable-http`
 * **17** — split completo do `server.py` em módulos
 * **24** — testes como suite `pytest` versionada, em vez de ad-hoc, e CI em matriz
+
+
+---
+
+# Anexo F — Item 26: instâncias genéricas (implementado 2026-10-24)
+
+Antes, `"uab"` e `"utad"` estavam escritos nas 32 assinaturas, em
+`_resolve_target`, nas variáveis `MOODLE_UTAD_*`, no nome do servidor e nas tags
+das notas geradas. A audiência endereçável eram duas universidades.
+
+## O registo
+
+As instâncias passaram a ser um registo aberto em `config.py`, alimentado por
+quatro fontes com a precedência habitual:
+
+| Fonte | Forma |
+|:---|:---|
+| Ambiente | `MOODLE_<NOME>_URL`, `MOODLE_<NOME>_TOKEN`, `MOODLE_DEFAULT_INSTANCE` |
+| `config.toml` | `[instances.<nome>] url = "…"` e `default_instance` |
+| `credentials.json` | `instances.<nome>.token`, a `0600` |
+| `.env` legado | o mesmo esquema, mais o par sem nome |
+
+A escolha do padrão `MOODLE_<NOME>_URL` não é arbitrária: é exactamente a forma
+que o `MOODLE_UTAD_URL` já tinha, pelo que o esquema específico de ontem passou a
+ser o esquema genérico e a retrocompatibilidade saiu de graça.
+
+`Instance` é um dataclass congelado (`name`, `url`, `token`); `instances()`,
+`default_instance()`, `resolve_instance()` e `instance_names()` são a API.
+
+## O enum é gerado da configuração
+
+O alias `Inst` deixou de ter uma descrição fixa. `_instance_field()` constrói o
+campo a partir de `config.instance_names()`, pelo que o cliente recebe na schema
+os nomes que *esta* instalação conhece, como `enum` quando há mais do que um:
+
+```json
+{"default": "ipl", "enum": ["ipl", "uab"],
+ "description": "Instância Moodle a usar. Configuradas nesta instalação: 'ipl', 'uab'. Omissão: 'ipl'."}
+```
+
+Com uma só instância não há `enum`, só a omissão — não vale restringir o que não
+tem alternativa. A omissão das 32 ferramentas passou de `"uab"` literal para a
+constante `DEFAULT_INSTANCE`, resolvida no arranque.
+
+Custo: a schema completa passou de ~8 483 para ~8 733 tokens, porque a descrição
+do campo cresce com o número de instâncias. Proporcional e aceitável.
+
+## Um bug que o teste apanhou, com implicação de segurança
+
+A primeira versão atribuía o `MOODLE_URL`/`MOODLE_TOKEN` sem nome à instância
+predefinida, fosse ela qual fosse. Com duas universidades configuradas e um
+`.env` legado por limpar, isso fazia o token de uma ser usado contra o servidor
+da outra — ou seja, enviar uma credencial institucional para terceiros.
+
+O par sem nome passou a formar a sua própria instância **e só quando não existe
+nenhuma instância nomeada**, que é o propósito da retrocompatibilidade. Havendo
+nomes, é ignorado com registo em DEBUG em vez de silenciosamente ligado ao sítio
+errado.
+
+## Resto da des-institucionalização
+
+Nome do servidor: `Moodle UAb/UTAD Doctoral Suite & Obsidian MCP Server` →
+`Moodle & Obsidian MCP Server`. As tags das notas (`[doutoramento, uc, uab]`)
+passaram a usar o nome da instância (`[moodle, uc, {instance}]`), assim como o
+título do painel. O `token_catcher` deixou de fixar `instance="uab"`.
+
+Ficam deliberadamente de fora, porque são outro item: os nomes de pasta e de nota
+em português (`Unidades Curriculares`, `Doutoramento - Painel Moodle.md`) e o
+vocabulário e-fólio/p-fólio, que precisam de templates e não de configuração.
+
+## Verificação
+
+16 asserções sobre o registo: `.env` legado a dar uma instância; três
+universidades por ambiente; leitura e escrita do `config.toml`; tokens isolados
+por instância e ausentes nas outras; `0600`; ambiente a ganhar ao ficheiro por
+instância e por campo; `MOODLE_MCP_*` e `MOODLE_DEFAULT_*` a não serem
+confundidos com nomes de instância; nome inválido a dar erro com a lista dos
+válidos; `default_instance` inválido a avisar e a cair no fallback.
+
+Mais 13 asserções de regressão do P0, P2 e P4, e o handshake MCP real em três
+configurações, onde se confirma que o cliente recebe `enum=['ipl','uab']` e
+`default='ipl'` quando é isso que está configurado.

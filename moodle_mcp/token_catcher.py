@@ -18,13 +18,13 @@ from moodle_mcp import server as moodle_mcp
 def handle_url(url: str):
     log_file = BASE_DIR / "last_auth.log"
     try:
-        res = moodle_mcp.decode_mobile_launch_token(url, instance="uab")
+        res = moodle_mcp.decode_mobile_launch_token(url, instance=moodle_mcp.DEFAULT_INSTANCE)
         site_info = res.get("validation", {}).get("site_info", {})
         user = site_info.get("fullname", "Utilizador")
         sync_res = moodle_mcp.sync_doctoral_dashboard_to_obsidian(
             download_materials=False,
             export_forums=True,
-            instance="uab",
+            instance=moodle_mcp.DEFAULT_INSTANCE,
         )
         # Never write raw tokens to log files
         log_file.write_text(

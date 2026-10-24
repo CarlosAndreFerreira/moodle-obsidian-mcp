@@ -57,7 +57,7 @@ maior precedência para a menor:
    (`env` no Claude Code, `environment` no opencode).
 2. **`config.toml`** no diretório de configuração do utilizador.
 3. **`credentials.json`** no mesmo diretório — só tokens, com permissões `0600`.
-4. **`.env`** ao lado do código — legado, ainda lido, migrado na primeira escrita.
+4. **`.env`** ao lado do código — legado, ainda lido.
 
 O diretório é o do sistema operativo: `~/.config/moodle-mcp` (Linux),
 `~/Library/Application Support/moodle-mcp` (macOS),
@@ -69,6 +69,45 @@ leitura.
 moodle-mcp --show-config      # onde tudo é lido, sem revelar segredos
 moodle-mcp --list-toolsets    # que ferramentas cada toolset expõe
 ```
+
+### Instâncias Moodle
+
+As instâncias são um registo aberto, não uma lista fixa: serve qualquer
+universidade que corra Moodle com os Web Services e o serviço da app móvel
+ativos. Declaram-se em `config.toml`:
+
+```toml
+default_instance = "uab"
+
+[instances.uab]
+url = "https://elearning.uab.pt"
+
+[instances.utad]
+url = "https://e-learning.utad.pt"
+```
+
+ou por ambiente, com `MOODLE_<NOME>_URL` e `MOODLE_<NOME>_TOKEN`:
+
+```json
+{
+  "env": {
+    "MOODLE_UAB_URL": "https://elearning.uab.pt",
+    "MOODLE_UTAD_URL": "https://e-learning.utad.pt",
+    "MOODLE_DEFAULT_INSTANCE": "uab"
+  }
+}
+```
+
+Os tokens vão para `credentials.json` sob `instances.<nome>.token`, gravados pelo
+`set_moodle_token` ou pelo capturador `moodlemobile://`. Cada ferramenta aceita
+`instance="<nome>"` e, quando há mais do que uma configurada, o nome aparece como
+**enum na schema** — o cliente e o modelo recebem os nomes válidos desta
+instalação em vez de texto livre.
+
+`MOODLE_URL` e `MOODLE_TOKEN` sem nome continuam a funcionar e formam a instância
+predefinida, mas só enquanto não houver nenhuma instância nomeada: atribuí-los a
+uma instância nomeada faria o token de uma universidade ser enviado para o
+servidor de outra.
 
 ### Toolsets
 
