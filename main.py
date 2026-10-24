@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import html
 import json
 import os
@@ -27,6 +28,99 @@ MOODLE_TOKEN = os.getenv("MOODLE_TOKEN", "").strip()
 MOODLE_UTAD_URL = os.getenv("MOODLE_UTAD_URL", "https://e-learning.utad.pt").rstrip("/")
 MOODLE_UTAD_TOKEN = os.getenv("MOODLE_UTAD_TOKEN", "").strip()
 OBSIDIAN_VAULT_DIR = os.path.expanduser(os.getenv("OBSIDIAN_VAULT_DIR", "~/Doutoramento"))
+
+
+_SECRET_KEYS = frozenset(
+    {
+        "wstoken",
+        "token",
+        "privatetoken",
+        "userprivateaccesskey",
+        "privateaccesskey",
+        "sesskey",
+        "password",
+    }
+)
+
+
+def _redact_secrets(payload: Any) -> Any:
+    """Remove recursivamente chaves que transportam credenciais de uma resposta Moodle.
+
+    Tudo o que uma ferramenta devolve é serializado para o prompt do provider de LLM
+    configurado no cliente e persistido no histórico da sessão em disco. O
+    `core_webservice_get_site_info` devolve `userprivateaccesskey`, pelo que a
+    redação é feita no único ponto de passagem HTTP em vez de ferramenta a ferramenta.
+
+    Args:
+        payload: Qualquer estrutura desserializada de JSON (dict, list ou escalar).
+
+    Returns:
+        A mesma estrutura, com os valores das chaves sensíveis substituídos por
+        `"[REDACTED]"`.
+    """
+    if isinstance(payload, dict):
+        return {
+            key: ("[REDACTED]" if key.lower() in _SECRET_KEYS and value else _redact_secrets(value))
+            for key, value in payload.items()
+        }
+    if isinstance(payload, list):
+        return [_redact_secrets(item) for item in payload]
+    return payload
+
+
+def _token_fingerprint(token: str) -> str:
+    """Devolve um identificador não reversível de um token, seguro para mostrar.
+
+    Permite confirmar *qual* token está configurado (e comparar entre execuções)
+    sem expor o segredo ao modelo.
+
+    Args:
+        token: O token em claro.
+
+    Returns:
+        `"sha256:<12 hex>"`, ou `""` se não houver token.
+    """
+    if not token:
+        return ""
+    return "sha256:" + hashlib.sha256(token.encode("utf-8")).hexdigest()[:12]
+
+
+def _vault_root() -> Path:
+    """Devolve a raiz canónica do Vault do Obsidian (único diretório gravável)."""
+    return Path(OBSIDIAN_VAULT_DIR).expanduser().resolve()
+
+
+def _resolve_in_vault(candidate: Any) -> Path:
+    """Resolve um caminho e recusa qualquer um que escape ao Vault do Obsidian.
+
+    Os nomes de ficheiro e os `fileurl` vêm do servidor Moodle e os caminhos de
+    destino são escolhidos pelo modelo, pelo que uma página de curso manipulada
+    poderia de outra forma dirigir uma escrita para `~/.ssh/authorized_keys` ou
+    `~/.config/autostart/`. `resolve()` segue symlinks, pelo que um link dentro do
+    Vault a apontar para fora também é apanhado.
+
+    Args:
+        candidate: Caminho absoluto ou relativo (relativo resolve a partir da raiz
+            do Vault).
+
+    Returns:
+        O caminho absoluto canónico, garantidamente dentro do Vault.
+
+    Raises:
+        ValueError: Se o caminho resolvido ficar fora do Vault.
+    """
+    root = _vault_root()
+    raw = Path(str(candidate)).expanduser()
+    if not raw.is_absolute():
+        raw = root / raw
+    target = raw.resolve()
+    if target != root and not target.is_relative_to(root):
+        raise ValueError(
+            f"Acesso recusado: '{target}' está fora do Vault do Obsidian ('{root}'). "
+            "Por segurança, o servidor só lê e escreve ficheiros dentro do Vault; "
+            "para mudar de Vault, altera OBSIDIAN_VAULT_DIR na configuração."
+        )
+    return target
 
 
 def _resolve_target(instance: str = "uab") -> tuple[str, str]:
@@ -69,7 +163,7 @@ def _moodle_call(
     else:
         response = requests.post(url, data=payload, timeout=30)
     response.raise_for_status()
-    return response.json()
+    return _redact_secrets(response.json())
 
 
 def _get_current_user_id(instance: str = "uab") -> int:
@@ -130,9 +224,22 @@ def set_moodle_token(
     instance: str = "uab",
     moodle_url: Optional[str] = None,
 ) -> dict[str, Any]:
-    """
-    Configura e guarda o token Moodle (para 'uab' ou 'utad') no ficheiro .env
-    e valida de imediato a ligação com core_webservice_get_site_info.
+    """Guarda o token Moodle no `.env` e valida logo a ligação ao site.
+
+    Aviso de segurança: o token entra por argumento, pelo que é enviado para o
+    provider de LLM configurado no cliente e fica no histórico da sessão. Para
+    configuração inicial, preferir escrever o `.env` à mão ou usar o capturador
+    `moodlemobile://`. A resposta nunca devolve o token, apenas a sua impressão
+    digital.
+
+    Args:
+        token: O `wstoken` do Web Service do Moodle.
+        instance: Instância a configurar, `"uab"` ou `"utad"`.
+        moodle_url: URL base alternativo a gravar para esta instância.
+
+    Returns:
+        Dicionário com `saved_to`, `instance`, `token_fingerprint` e o `site_info`
+        devolvido pelo Moodle (já redigido).
     """
     global MOODLE_TOKEN, MOODLE_URL, MOODLE_UTAD_TOKEN, MOODLE_UTAD_URL
     clean_token = token.strip()
@@ -153,30 +260,56 @@ def set_moodle_token(
     return {
         "saved_to": env_file,
         "instance": instance,
+        "token_fingerprint": _token_fingerprint(clean_token),
         "site_info": site_info,
     }
 
 
 @mcp.tool()
 def decode_mobile_launch_token(launch_url_or_base64: str, instance: str = "uab") -> dict[str, Any]:
-    """
-    Descodifica um URL `moodlemobile://token=...` (obtido via `/admin/tool/mobile/launch.php?service=moodle_mobile_app&passport=12345`)
-    e guarda automaticamente o `wstoken` e `privatetoken` no ficheiro `.env`.
+    """Descodifica um URL `moodlemobile://token=...` e guarda o `wstoken` no `.env`.
+
+    O URL é obtido em
+    `/admin/tool/mobile/launch.php?service=moodle_mobile_app&passport=12345`.
+
+    A resposta nunca inclui o payload descodificado nem o token: ambos iriam para
+    o provider de LLM configurado no cliente e ficariam no histórico da sessão.
+    Devolve apenas a impressão digital do token e a validação da ligação.
+
+    Args:
+        launch_url_or_base64: O URL `moodlemobile://token=...` completo ou só a
+            parte em Base64.
+        instance: Instância a configurar, `"uab"` ou `"utad"`.
+
+    Returns:
+        Dicionário com `saved`, `instance`, `token_fingerprint`, `has_privatetoken`
+        e `validation` (o resultado de `set_moodle_token`).
     """
     raw = launch_url_or_base64.strip()
     if "token=" in raw:
         raw = raw.split("token=", 1)[1].split("&", 1)[0]
     decoded = base64.b64decode(raw + "===").decode("utf-8", errors="ignore")
     parts = decoded.split(":::")
-    result: dict[str, Any] = {"raw_decoded": decoded}
-    if len(parts) >= 2:
-        token = parts[1].strip()
-        result["wstoken"] = token
-        if len(parts) >= 3:
-            result["privatetoken"] = parts[2].strip()
-        set_res = set_moodle_token(token, instance=instance)
-        result["validation"] = set_res
-    return result
+    if len(parts) < 2 or not parts[1].strip():
+        return {
+            "error": True,
+            "saved": False,
+            "message": (
+                "O payload descodificado não tem o formato esperado "
+                "`passport:::wstoken[:::privatetoken]`. Confirma que o URL veio de "
+                "`/admin/tool/mobile/launch.php`. (O conteúdo descodificado não é "
+                "mostrado por poder conter credenciais.)"
+            ),
+        }
+
+    token = parts[1].strip()
+    return {
+        "saved": True,
+        "instance": instance,
+        "token_fingerprint": _token_fingerprint(token),
+        "has_privatetoken": len(parts) >= 3 and bool(parts[2].strip()),
+        "validation": set_moodle_token(token, instance=instance),
+    }
 
 
 @mcp.tool()
@@ -184,11 +317,23 @@ def extract_token_from_session_cookie(
     moodle_session_cookie: str,
     instance: str = "uab",
 ) -> dict[str, Any]:
-    """
-    Se já tiveres feito login no browser e passares o valor do cookie `MoodleSession`
-    (visível em F12 -> Storage/Application -> Cookies -> MoodleSession),
-    esta ferramenta extrai automaticamente a tua Chave de Segurança (Token) de `/user/managetoken.php`
-    ou do endpoint `/admin/tool/mobile/launch.php` e guarda-a no `.env`!
+    """Extrai o token do Moodle a partir de um cookie `MoodleSession` ativo.
+
+    Tenta `/user/managetoken.php` e, em alternativa, `/admin/tool/mobile/launch.php`.
+    O cookie é visível em F12 -> Storage/Application -> Cookies -> MoodleSession.
+
+    Aviso de segurança: o cookie de sessão entra por argumento, logo é enviado
+    para o provider de LLM configurado no cliente e fica no histórico da sessão.
+    Preferir o capturador `moodlemobile://`, que não passa pelo canal MCP. A
+    resposta nunca devolve o token nem o cookie.
+
+    Args:
+        moodle_session_cookie: Valor do cookie `MoodleSession`.
+        instance: Instância a configurar, `"uab"` ou `"utad"`.
+
+    Returns:
+        O resultado de `set_moodle_token` (com impressão digital, sem o token), ou
+        um dicionário de erro se a sessão já não estiver ativa.
     """
     base_url, _ = _resolve_target(instance)
     session = requests.Session()
@@ -218,8 +363,11 @@ def extract_token_from_session_cookie(
     return {
         "error": True,
         "status_code": resp.status_code,
-        "redirected_url": resp.url,
-        "message": "Não foi possível extrair o token automaticamente com este MoodleSession. Verifica se a sessão ainda está ativa.",
+        "redirected_to_login": "login" in resp.url.lower(),
+        "message": (
+            "Não foi possível extrair o token automaticamente com este MoodleSession. "
+            "Verifica se a sessão ainda está ativa."
+        ),
     }
 
 
@@ -342,14 +490,30 @@ def download_moodle_file(
     extract_pdf_to_markdown: bool = True,
     instance: str = "uab",
 ) -> dict[str, Any]:
-    """
-    Descarrega um ficheiro autenticado do Moodle (PDF, DOCX, PPTX, ZIP, etc.) usando o teu token.
-    Se for um PDF e `extract_pdf_to_markdown=True`, extrai automaticamente todo o texto com PyMuPDF
-    para um ficheiro `.md` ao lado do PDF para que o Obsidian e o assistente de IA o possam ler e pesquisar!
+    """Descarrega um ficheiro autenticado do Moodle para dentro do Vault.
+
+    Se for um PDF e `extract_pdf_to_markdown=True`, extrai todo o texto com
+    PyMuPDF para um `.md` ao lado do PDF, pesquisável no Obsidian.
+
+    `dest_path` tem de ficar dentro de `OBSIDIAN_VAULT_DIR`: um caminho relativo
+    resolve a partir da raiz do Vault e qualquer caminho que escape é recusado.
+
+    Args:
+        file_url: O `fileurl` devolvido pela API do Moodle (sem token).
+        dest_path: Destino, absoluto dentro do Vault ou relativo à raiz do Vault.
+        extract_pdf_to_markdown: Se extrai o texto de PDFs para um `.md` irmão.
+        instance: Instância Moodle, `"uab"` ou `"utad"`.
+
+    Returns:
+        Dicionário com `downloaded_file`, `size_bytes` e, para PDFs,
+        `extracted_markdown` e `pdf_pages`.
+
+    Raises:
+        ValueError: Se `dest_path` cair fora do Vault.
     """
     _, token = _resolve_target(instance)
     auth_url = _append_token_to_fileurl(file_url, token)
-    target = Path(dest_path).expanduser().resolve()
+    target = _resolve_in_vault(dest_path)
     target.parent.mkdir(parents=True, exist_ok=True)
 
     with requests.get(auth_url, stream=True, timeout=60) as r:
@@ -382,11 +546,12 @@ def download_moodle_file(
                 text = page.get_text("text").strip()
                 if text:
                     md_pages.append(f"## Página {idx}\n\n{text}\n")
+            n_pages = len(doc)
             doc.close()
             md_path = target.with_suffix(".pdf.md")
             md_path.write_text("\n".join(md_pages), encoding="utf-8")
             result["extracted_markdown"] = str(md_path)
-            result["pdf_pages"] = idx
+            result["pdf_pages"] = n_pages
         except Exception as e:
             result["pdf_extraction_warning"] = str(e)
 
@@ -402,7 +567,7 @@ def download_all_course_materials_to_obsidian(
     """
     Descarrega TODOS os ficheiros (PDFs, enunciados de e-fólios, slides, textos de apoio e páginas HTML)
     de uma disciplina diretamente para a pasta da Unidade Curricular dentro do teu Vault do Obsidian
-    (`/home/carlos-andr-ferreira/Doutoramento/Unidades Curriculares/<Nome da UC>/Materiais/`),
+    (`<Vault>/Unidades Curriculares/<Nome da UC>/Materiais/`),
     convertendo também os PDFs e Páginas HTML em notas Markdown pesquisáveis!
     """
     _, token = _resolve_target(instance)
@@ -420,7 +585,7 @@ def download_all_course_materials_to_obsidian(
                 cname = _safe_filename(c.get("fullname") or c.get("shortname") or cname)
                 break
 
-    base_uc_dir = Path(OBSIDIAN_VAULT_DIR).expanduser().resolve() / "Unidades Curriculares" / cname / "Materiais"
+    base_uc_dir = _resolve_in_vault(Path("Unidades Curriculares") / cname / "Materiais")
     base_uc_dir.mkdir(parents=True, exist_ok=True)
 
     downloaded = []
@@ -541,12 +706,27 @@ def get_course_quizzes(course_id: int, instance: str = "uab"):
 
 @mcp.tool()
 def upload_file_to_draft(file_path: str, item_id: int = 0, instance: str = "uab") -> Any:
-    """
-    Faz upload de um ficheiro local (ex.: PDF do teu e-fólio ou tese) para a área de rascunho (draft area) do Moodle.
-    Retorna o `itemid` que pode ser passado a `save_assignment_submission` ou `reply_to_forum_post`.
+    """Envia um ficheiro do Vault para a área de rascunho (draft area) do Moodle.
+
+    `file_path` tem de estar dentro de `OBSIDIAN_VAULT_DIR`: o upload sai da
+    máquina para o servidor da universidade, pelo que ler um caminho arbitrário
+    seria um canal de exfiltração (p.ex. `~/.ssh/id_rsa`). Coloca o e-fólio no
+    Vault antes de o submeter.
+
+    Args:
+        file_path: Ficheiro a enviar, dentro do Vault (absoluto ou relativo à raiz).
+        item_id: `itemid` do draft a reutilizar; 0 cria um novo.
+        instance: Instância Moodle, `"uab"` ou `"utad"`.
+
+    Returns:
+        A resposta do `upload.php`, que inclui o `itemid` a passar a
+        `save_assignment_submission` ou `reply_to_forum_post`.
+
+    Raises:
+        ValueError: Se `file_path` cair fora do Vault.
     """
     base_url, token = _resolve_target(instance)
-    path = Path(file_path).expanduser().resolve()
+    path = _resolve_in_vault(file_path)
     if not path.exists():
         return {"error": True, "message": f"Ficheiro não encontrado: {path}"}
 
@@ -785,7 +965,7 @@ def get_messages(read: bool = False, instance: str = "uab"):
 def export_forum_discussions_to_obsidian(course_id: int, instance: str = "uab") -> dict[str, Any]:
     """
     Exporta todos os fóruns e debates de uma disciplina para ficheiros Markdown organizados no Obsidian
-    (`/home/carlos-andr-ferreira/Doutoramento/Unidades Curriculares/<UC>/Foruns/`).
+    (`<Vault>/Unidades Curriculares/<UC>/Foruns/`).
     Excelente na UAb para teres todas as orientações do professor e discussões assíncronas no teu Vault!
     """
     forums = get_course_forums(course_id, instance=instance)
@@ -801,7 +981,7 @@ def export_forum_discussions_to_obsidian(course_id: int, instance: str = "uab") 
                 cname = _safe_filename(c.get("fullname") or c.get("shortname") or cname)
                 break
 
-    foruns_dir = Path(OBSIDIAN_VAULT_DIR).expanduser().resolve() / "Unidades Curriculares" / cname / "Foruns"
+    foruns_dir = _resolve_in_vault(Path("Unidades Curriculares") / cname / "Foruns")
     foruns_dir.mkdir(parents=True, exist_ok=True)
 
     exported_files = []
@@ -901,7 +1081,7 @@ def sync_doctoral_dashboard_to_obsidian(
     Se `export_forums=True`, exporta também todos os tópicos dos fóruns para o Obsidian!
     """
     base_url, _ = _resolve_target(instance)
-    target_dir = Path(vault_dir or OBSIDIAN_VAULT_DIR).expanduser().resolve()
+    target_dir = _resolve_in_vault(vault_dir) if vault_dir else _vault_root()
     target_dir.mkdir(parents=True, exist_ok=True)
     uc_dir = target_dir / "Unidades Curriculares"
     uc_dir.mkdir(parents=True, exist_ok=True)
