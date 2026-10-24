@@ -26,24 +26,6 @@ config.save_setting("obsidian_vault_dir", sys.argv[1])
 print(f"✅ Configuração em {config.config_file()}")
 PYEOF
 
-# 3. Registar handler Linux x-scheme-handler/moodlemobile para auto-descoberta de Token via SSO
-:
-mkdir -p "$HOME/.local/share/applications"
-cat > "$HOME/.local/share/applications/moodle-token-catcher.desktop" <<EOF
-[Desktop Entry]
-Name=Moodle Mobile Token Catcher (MCP Obsidian)
-Comment=Captura automaticamente o token moodlemobile:// do browser e sincroniza com o Obsidian
-Exec=$REPO_DIR/.venv/bin/moodle-mcp-token-catcher %u
-Terminal=false
-Type=Application
-MimeType=x-scheme-handler/moodlemobile;
-NoDisplay=true
-EOF
-
-update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
-xdg-mime default moodle-token-catcher.desktop x-scheme-handler/moodlemobile 2>/dev/null || true
-
-echo "✅ Handler 'moodlemobile://' registado com sucesso!"
-echo ""
-echo "🔑 Para autenticar via SSO (UTAD/UAb) automaticamente no browser, abre:"
-echo "   https://elearning.uab.pt/admin/tool/mobile/launch.php?service=moodle_mobile_app&passport=12345"
+# 3. Registar o handler moodlemobile:// (o próprio programa sabe fazê-lo em
+#    Linux, Windows e macOS; aqui só o invocamos)
+"$REPO_DIR/.venv/bin/moodle-mcp" --install-handler

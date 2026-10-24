@@ -99,7 +99,7 @@ config > omissões. Mantém compatibilidade com o `env:` que os clientes injecta
 Melhor ainda: token no `keyring` do SO, com fallback para ficheiro. Resolve de passagem
 o `chmod 600` do `install.sh`, que **não faz nada no Windows**.
 
-### 7. `install.sh` é Linux-only
+### 7. `install.sh` é Linux-only — ✅ FEITO
 `bash`, `xdg-mime`, `.desktop` em `~/.local/share/applications`, `update-desktop-database`.
 O registo do handler `moodlemobile://` — que é a melhor ideia do projeto — não existe
 nos outros sistemas.
@@ -684,8 +684,6 @@ temporário, pelo que a configuração real não foi tocada.
 
 ## O que falta do P1
 
-* **7** — handler `moodlemobile://` por sistema operativo (o `install.sh` continua
-  Linux-only, embora já instale o pacote e use o entrypoint novo)
 * **8** — nomes de ficheiro reservados do Windows
 * **9** — `--transport streamable-http`
 * **17** — split completo do `server.py` em módulos
@@ -824,3 +822,58 @@ Nota sobre a AGPL: o PyMuPDF continua a ser extra opcional, pelo que a MIT do
 projeto não entra em conflito. Quem instalar `moodle-mcp[pdf]` fica sujeito à
 AGPL-3.0 dessa dependência, o que convém dizer no README se o projeto for
 divulgado.
+
+
+---
+
+# Anexo H — Item 7 (P1.7): handler por sistema operativo
+
+O registo do esquema `moodlemobile://` era `xdg-mime` mais um `.desktop` dentro
+do `install.sh`, ou seja, Linux e bash. Passou para `moodle_mcp/handler.py`, com
+`moodle-mcp --install-handler` e `--uninstall-handler`. O `install.sh` deixou de
+duplicar a lógica e passa a invocá-la.
+
+| Sistema | Mecanismo | Privilégios |
+|:---|:---|:---|
+| Linux | `.desktop` com `MimeType=x-scheme-handler/moodlemobile` em `$XDG_DATA_HOME/applications`, mais `update-desktop-database` e `xdg-mime default` | nenhum |
+| Windows | chaves em `HKEY_CURRENT_USER\Software\Classes\moodlemobile`, com `URL Protocol` vazio a marcar o esquema e `"%1"` no comando | nenhum (ramo do utilizador) |
+| macOS | pacote `.app` em `~/Applications` com `CFBundleURLTypes` no `Info.plist` e `LSUIElement`, registado com `lsregister` | nenhum |
+
+## Como foi feito para ser verificável
+
+O conteúdo de cada artefacto sai de funções puras — `desktop_entry`,
+`windows_registry_values`, `info_plist`, `app_launcher` — separadas da escrita.
+Isso permite verificar o resultado dos três sistemas a partir de qualquer um
+deles, e é o que torna este item testável sem três máquinas.
+
+O `Info.plist` é validado a reler com `plistlib` e o `.desktop` com
+`desktop-file-validate`, em vez de inspeção visual.
+
+## Um bug que o teste apanhou
+
+A primeira versão localizava o executável com `shutil.which`, que falhava
+precisamente no caso normal: invocar `<venv>/bin/moodle-mcp` não põe esse
+diretório no PATH, pelo que o handler ficaria registado com
+`python -m moodle_mcp.token_catcher` em vez do console script. Passou a procurar
+primeiro **ao lado do interpretador em uso**, que é onde o pip e o uv instalam o
+script (`bin/` em POSIX, `Scripts/` em Windows, com `.exe`), e só depois no PATH.
+
+## Verificação, e o que fica sem verificar
+
+Em Linux: instalação real, `.desktop` aprovado pelo `desktop-file-validate`,
+`xdg-mime query` a confirmar que o sistema aponta para o handler, e
+remoção/reinstalação idempotentes.
+
+Windows: o `winreg` foi substituído por um módulo falso para verificar as quatro
+chaves e valores exactos que seriam escritos, e a ordem de remoção (da subchave
+mais funda para a raiz, que é o que o `DeleteKey` exige).
+
+macOS: o `.app` é escrito a sério num diretório temporário, o `Info.plist` relido
+com o `plistlib`, as permissões do launcher verificadas, e a ausência do
+`lsregister` reportada em vez de ignorada.
+
+**O que isto não é:** uma verificação em Windows ou macOS reais. A lógica e os
+artefactos estão testados; se o Explorer e o Launch Services aceitam o que é
+escrito, só se sabe nessas máquinas. É o item 24 (CI em matriz) que fecha esta
+lacuna, e até lá a afirmação honesta é "implementado para os três, verificado em
+Linux".

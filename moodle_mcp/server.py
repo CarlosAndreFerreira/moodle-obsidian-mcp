@@ -37,7 +37,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
-from moodle_mcp import __version__, config
+from moodle_mcp import __version__, config, handler
 
 try:  # O PyMuPDF é AGPL-3.0 e fica no extra `[pdf]`; sem ele tudo o resto funciona.
     import pymupdf as fitz
@@ -1815,8 +1815,42 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Mostra os caminhos e os valores de configuração em uso, e termina.",
     )
+    parser.add_argument(
+        "--install-handler",
+        action="store_true",
+        help=(
+            f"Registra este programa como handler do esquema {handler.SCHEME}:// "
+            "no sistema operativo, e termina. É o que permite capturar o token "
+            "automaticamente a partir do navegador em logins com SSO federado."
+        ),
+    )
+    parser.add_argument(
+        "--uninstall-handler",
+        action="store_true",
+        help=f"Remove o registo do esquema {handler.SCHEME}://, e termina.",
+    )
     parser.add_argument("--version", action="version", version=f"moodle-mcp {__version__}")
     args = parser.parse_args(argv)
+
+    if args.install_handler or args.uninstall_handler:
+        try:
+            result = handler.install() if args.install_handler else handler.uninstall()
+        except handler.HandlerError as exc:
+            parser.error(str(exc))
+        for key, value in result.items():
+            if isinstance(value, list):
+                print(f"{key}:")
+                for item in value:
+                    print(f"  - {item}")
+            else:
+                print(f"{key}: {value}")
+        if args.install_handler:
+            print(
+                "\nPara autenticar: faz login no Moodle no navegador e abre "
+                "<url-do-moodle>/admin/tool/mobile/launch.php"
+                "?service=moodle_mobile_app&passport=12345"
+            )
+        return 0
 
     if args.show_config:
         for key, value in config.describe().items():

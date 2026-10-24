@@ -42,11 +42,19 @@ O extra `[pdf]` acrescenta a extração de texto de PDFs via PyMuPDF. Fica de fo
 da instalação base porque o PyMuPDF é AGPL-3.0: sem ele, tudo o resto funciona e
 os downloads de PDF apenas não geram o `.md` acompanhante.
 
-Para registar o handler `moodlemobile://` em Linux (captura de token via SSO):
+Para registar o handler `moodlemobile://`, que é o que permite capturar o token
+a partir do navegador quando a universidade usa SSO federado:
 
 ```bash
-bash install.sh ~/Doutoramento
+moodle-mcp --install-handler     # Linux, macOS e Windows
+moodle-mcp --uninstall-handler
 ```
+
+O mecanismo difere por sistema e o comando escolhe o certo: um ficheiro
+`.desktop` com `xdg-mime` em Linux, chaves em `HKEY_CURRENT_USER` em Windows
+(sem precisar de administrador), e um pacote `.app` com `CFBundleURLTypes`
+registado no Launch Services em macOS. Não precisa de privilégios elevados em
+nenhum deles.
 
 ### Configuração
 
