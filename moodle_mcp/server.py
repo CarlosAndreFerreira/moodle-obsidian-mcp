@@ -1668,10 +1668,19 @@ TOOLSETS: dict[str, tuple[str, ...]] = {
     "raw": ("call_any_moodle_wsfunction",),
 }
 
-#: Ativos por omissão. `raw` fica de fora: o `call_any_moodle_wsfunction` dá
-#: acesso total à API de Web Services, incluindo escrita, e é uma boa ferramenta
-#: de diagnóstico mas má para estar sempre ligada.
-DEFAULT_TOOLSETS = ("core", "grades", "forums", "obsidian", "write")
+#: Ativos por omissão: só leitura do Moodle e escrita no Vault local.
+#:
+#: `write` fica de fora porque as suas ferramentas agem em nome do estudante do
+#: lado da universidade — submeter um trabalho, publicar num fórum avaliado,
+#: enviar uma mensagem — e nenhuma dessas ações tem como ser desfeita. Expor por
+#: omissão o que é irreversível faz com que uma interpretação errada do modelo
+#: baste para a provocar; exigir `--tools ...,write` torna-a uma decisão de quem
+#: configura o servidor.
+#:
+#: `raw` fica de fora pela mesma razão vista de outro ângulo: o
+#: `call_any_moodle_wsfunction` dá acesso total à API de Web Services, escrita
+#: incluída, o que é bom para diagnóstico e mau para estar sempre ligado.
+DEFAULT_TOOLSETS = ("core", "grades", "forums", "obsidian")
 
 
 def _iter_registered_tools() -> list[Any]:
@@ -1873,6 +1882,12 @@ def main(argv: list[str] | None = None) -> int:
 
     removed = apply_toolsets(enabled)
     titles = strip_schema_titles()
+    for risky, nota in (
+        ("write", "podem submeter trabalhos, publicar em fóruns e enviar mensagens"),
+        ("raw", "dão acesso total à API de Web Services, escrita incluída"),
+    ):
+        if risky in enabled:
+            logger.warning("Toolset '%s' ativo: as suas ferramentas %s.", risky, nota)
     logger.info(
         "Toolsets ativos: %s | %d ferramentas expostas (%d retiradas, %d titles removidos)",
         ",".join(sorted(enabled)),

@@ -119,17 +119,28 @@ servidor de outra.
 
 ### Toolsets
 
-As 32 ferramentas custam ~8 500 tokens de contexto em cada pedido. Expor só o que
-usas corta isso para menos de metade:
+As 32 ferramentas custam ~8 700 tokens de contexto em cada pedido. Expor só o
+que usas corta isso para menos de metade:
 
-| `--tools` | Tools | ~tokens |
-|:---|--:|--:|
-| (omissão) | 31 | 8 225 |
-| `core,obsidian` | 15 | 4 321 |
-| `core` | 11 | 2 793 |
+| `--tools` | Tools | ~tokens | Escrita no Moodle |
+|:---|--:|--:|:---|
+| **(omissão)** | **24** | **6 189** | **não** |
+| `core,grades,forums,obsidian,write` | 31 | 8 462 | sim |
+| `all` | 32 | 8 733 | sim, mais a API livre |
+| `core,obsidian` | 15 | 4 435 | não |
+| `core` | 11 | 2 881 | não |
 
-`core` é sempre incluído. `raw` (a ferramenta que chama qualquer função da API,
-escrita incluída) fica de fora da omissão e tem de ser pedido explicitamente.
+`core` é sempre incluído.
+
+**As ferramentas que escrevem no Moodle não vêm ligadas.** Submeter um trabalho,
+publicar num fórum avaliado ou enviar uma mensagem age em nome do estudante do
+lado da universidade, e nenhuma dessas ações se desfaz. Por omissão o servidor
+lê do Moodle e escreve apenas no Vault local; para as activar é preciso
+`--tools ...,write`, e o servidor registra um aviso no arranque quando estão
+ligadas. O mesmo vale para `raw`, que expõe a API de Web Services por inteiro.
+
+Das 24 ferramentas da omissão, 17 estão marcadas como `readOnlyHint`, pelo que
+um cliente as pode auto-aprovar sem auto-aprovar nada irreversível.
 
 ### Configuração nos clientes
 
