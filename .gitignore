@@ -30,3 +30,6 @@ build/
 .vscode/
 .idea/
 .DS_Store
+
+# Notas de análise internas: ficam em disco, fora do repositório
+MELHORIAS.md
