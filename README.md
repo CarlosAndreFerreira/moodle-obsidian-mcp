@@ -165,6 +165,12 @@ escrita incluída) fica de fora da omissão e tem de ser pedido explicitamente.
 
 ---
 
+## 📄 Licença
+
+MIT — ver [LICENSE](LICENSE). O extra `[pdf]` instala o PyMuPDF, que é
+**AGPL-3.0**: se o usares, essa dependência traz as suas próprias obrigações.
+Sem o extra, o servidor funciona e apenas não gera o `.md` acompanhante dos PDFs.
+
 ## 🔒 Segurança e Privacidade
 * O ficheiro `.gitignore` bloqueia estritamente `.env`, `*.log` e quaisquer ficheiros de credenciais/tokens.
 * O script `capture_mobile_token.py` nunca regista tokens em ficheiros de log.

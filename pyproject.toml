@@ -9,7 +9,8 @@ description = "Servidor MCP para Moodle (UAb/UTAD) com sincronização para o Ob
 readme = "README.md"
 # tomllib é stdlib a partir do 3.11 e é o que lê o config.toml sem dependências.
 requires-python = ">=3.11"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "Carlos André Ferreira" }]
 keywords = ["mcp", "moodle", "obsidian", "model-context-protocol"]
 classifiers = [
