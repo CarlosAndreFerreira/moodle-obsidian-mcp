@@ -241,7 +241,7 @@ os geradores de Markdown (`sync_doctoral_dashboard_to_obsidian` produz texto —
 GitHub Actions em matriz `ubuntu / macos / windows` × `3.10–3.13`: é a única forma
 honesta de afirmar que funciona no Windows. `ruff` + `mypy` + `pre-commit`.
 
-### 25. Sem `LICENSE` — e o PyMuPDF é AGPL
+### 25. Sem `LICENSE` — e o PyMuPDF é AGPL — ✅ FEITO
 Não há ficheiro de licença, o que na prática impede qualquer terceiro de usar o código.
 E `pymupdf` 2.0 é AGPL-3.0 (ou comercial): só te afeta **se distribuíres** o projeto,
 mas a AGPL é viral e obrigaria o teu código a ser AGPL também.
@@ -772,3 +772,55 @@ válidos; `default_instance` inválido a avisar e a cair no fallback.
 Mais 13 asserções de regressão do P0, P2 e P4, e o handshake MCP real em três
 configurações, onde se confirma que o cliente recebe `enum=['ipl','uab']` e
 `default='ipl'` quando é isso que está configurado.
+
+
+---
+
+# Anexo G — Item 25: LICENSE (implementado 2026-10-24)
+
+O `pyproject.toml` declarava MIT e não havia ficheiro de licença, o que na
+prática impedia qualquer terceiro de usar o código. Acrescentado `LICENSE` (MIT,
+2026) e a metadata passada a PEP 639: `license = "MIT"` com
+`license-files = ["LICENSE"]`, o que faz o ficheiro seguir dentro do wheel e do
+sdist em vez de ficar só no repositório. O `METADATA` do pacote passou de
+`License: MIT` para `License-Expression: MIT` e `License-File: LICENSE`.
+
+## Um defeito que só apareceu por se construir o pacote
+
+Ao verificar se a licença seguia no wheel, o conteúdo do wheel anterior mostrou
+três módulos em vez de quatro: **o `moodle_mcp/token_catcher.py` não ia no
+pacote**, enquanto o `pyproject.toml` continuava a declarar o console script
+`moodle-mcp-token-catcher = "moodle_mcp.token_catcher:cli"`.
+
+Causa: o `.gitignore` tinha `*token*`, herdado da altura em que o capturador se
+chamava `capture_mobile_token.py` e tinha uma excepção própria. O ficheiro
+renomeado passou a casar com o padrão, e como o backend de build usa o
+`.gitignore` para escolher o que empacotar, o módulo era descartado em silêncio.
+
+Consequência real: quem instalasse por `uvx` ou do PyPI receberia um comando
+declarado que falha com `ImportError` — e a captura de token por SSO, que é a
+funcionalidade mais distintiva do projeto, não existiria. Localmente nunca se
+notava, porque a instalação editável lê do repositório.
+
+Os padrões do `.gitignore` passaram a ser específicos (`credentials.json`,
+`*.token`, `*_token.json`, `.env`, `*.log`) em vez de um `*token*` que apanhava
+código a fingir que protegia segredos.
+
+## Verificação
+
+Build real com `uv build`, e comparação do wheel antes e depois:
+
+| | módulos | LICENSE | token_catcher |
+|:---|--:|:---:|:---:|
+| antes | 3 | não | **não** |
+| depois | 4 | sim | **sim** |
+
+Mais a instalação do wheel num venv limpo **sem o extra `[pdf]`**, onde
+`moodle-mcp --version`, `--list-toolsets` e `moodle-mcp-token-catcher` correm
+todos, e o `importlib.metadata` devolve `License-Expression: MIT` com o ficheiro
+em `dist-info/licenses/LICENSE`. O sdist leva ambos os ficheiros.
+
+Nota sobre a AGPL: o PyMuPDF continua a ser extra opcional, pelo que a MIT do
+projeto não entra em conflito. Quem instalar `moodle-mcp[pdf]` fica sujeito à
+AGPL-3.0 dessa dependência, o que convém dizer no README se o projeto for
+divulgado.

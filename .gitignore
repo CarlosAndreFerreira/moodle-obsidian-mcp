@@ -1,11 +1,17 @@
-# Security: NEVER commit tokens, session cookies, or auth logs
+# Security: NEVER commit tokens, session cookies, or auth logs.
+# These patterns are deliberately specific. A blunt `*token*` also matched
+# moodle_mcp/token_catcher.py, and because the build backend reads this file
+# to pick what to package, the module was silently dropped from built wheels
+# while its console script stayed declared.
 .env
 .env.*
 !.env.example
 *.log
 last_auth.log
-*token*
-!capture_mobile_token.py
+credentials.json
+*.token
+*_token.json
+.moodle/
 
 # Virtual environments & Python cache
 .venv/
