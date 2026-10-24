@@ -1,6 +1,5 @@
-mcp>=1.0.0,<2.0.0
-requests>=2.31.0
-python-dotenv>=1.0.0
-beautifulsoup4>=4.12.0
-markdownify>=0.13.0
-pymupdf>=1.24.0
+# As dependências passaram para o pyproject.toml (fonte única de verdade).
+# Instalação recomendada:
+#   uv pip install -e ".[pdf]"     (ou)   pip install -e ".[pdf]"
+# Mantido para quem tenha automatismos a apontar para este ficheiro:
+-e .[pdf]

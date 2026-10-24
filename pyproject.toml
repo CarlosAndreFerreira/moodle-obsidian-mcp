@@ -1,0 +1,60 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "moodle-mcp"
+version = "0.2.0"
+description = "Servidor MCP para Moodle (UAb/UTAD) com sincronização para o Obsidian"
+readme = "README.md"
+# tomllib é stdlib a partir do 3.11 e é o que lê o config.toml sem dependências.
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Carlos André Ferreira" }]
+keywords = ["mcp", "moodle", "obsidian", "model-context-protocol"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Topic :: Education",
+]
+dependencies = [
+  "mcp>=1.9.0,<2.0.0",
+  "requests>=2.31.0",
+  "beautifulsoup4>=4.12.0",
+  "markdownify>=0.13.0",
+  "platformdirs>=4.0.0",
+]
+
+[project.optional-dependencies]
+# O PyMuPDF é AGPL-3.0 e é viral: fica como extra para que instalar o servidor
+# não imponha a licença a quem não precise da extração de texto de PDFs.
+pdf = ["pymupdf>=1.24.0"]
+dev = ["pytest>=8.0", "responses>=0.25", "ruff>=0.6", "mypy>=1.11"]
+
+[project.scripts]
+moodle-mcp = "moodle_mcp.server:main"
+moodle-mcp-token-catcher = "moodle_mcp.token_catcher:cli"
+
+[project.urls]
+Homepage = "https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp"
+
+[tool.hatch.build.targets.wheel]
+packages = ["moodle_mcp"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "D"]
+ignore = ["D203", "D213"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["D"]
+# As docstrings do server.py são anteriores a esta configuração e não seguem
+# ainda o estilo Google por completo (secções Args/Returns/Raises). O gate fica
+# verde e estas regras são ligadas quando as docstrings forem normalizadas.
+"moodle_mcp/server.py" = ["D205", "D212", "D400", "D401", "D413", "D301", "E501"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_unused_ignores = true

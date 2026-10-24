@@ -10,34 +10,30 @@ mkdir -p "$VAULT_DIR"
 # 1. Criar ambiente virtual Python (via uv ou python3 -m venv)
 if command -v uv >/dev/null 2>&1; then
     uv venv --python 3.12 "$REPO_DIR/.venv"
-    uv pip install --python "$REPO_DIR/.venv/bin/python" -r "$REPO_DIR/requirements.txt"
+    uv pip install --python "$REPO_DIR/.venv/bin/python" -e "$REPO_DIR[pdf]"
 else
     python3 -m venv "$REPO_DIR/.venv"
     "$REPO_DIR/.venv/bin/pip" install --upgrade pip
-    "$REPO_DIR/.venv/bin/pip" install -r "$REPO_DIR/requirements.txt"
+    "$REPO_DIR/.venv/bin/pip" install -e "$REPO_DIR[pdf]"
 fi
 
-# 2. Criar .env se não existir
-if [ ! -f "$REPO_DIR/.env" ]; then
-    cat > "$REPO_DIR/.env" <<EOF
-MOODLE_URL=https://elearning.uab.pt
-MOODLE_TOKEN=
-MOODLE_UTAD_URL=https://e-learning.utad.pt
-MOODLE_UTAD_TOKEN=
-OBSIDIAN_VAULT_DIR=$VAULT_DIR
-EOF
-    chmod 600 "$REPO_DIR/.env"
-    echo "✅ Criado ficheiro .env (permissões 600)."
-fi
+# 2. Escrever a configuração no diretório do utilizador (não junto ao código:
+#    com uvx/pipx o pacote corre de uma cache efémera e possivelmente só de leitura)
+"$REPO_DIR/.venv/bin/python" - "$VAULT_DIR" <<'PYEOF'
+import sys
+from moodle_mcp import config
+config.save_setting("obsidian_vault_dir", sys.argv[1])
+print(f"✅ Configuração em {config.config_file()}")
+PYEOF
 
 # 3. Registar handler Linux x-scheme-handler/moodlemobile para auto-descoberta de Token via SSO
-chmod +x "$REPO_DIR/capture_mobile_token.py"
+:
 mkdir -p "$HOME/.local/share/applications"
 cat > "$HOME/.local/share/applications/moodle-token-catcher.desktop" <<EOF
 [Desktop Entry]
 Name=Moodle Mobile Token Catcher (MCP Obsidian)
 Comment=Captura automaticamente o token moodlemobile:// do browser e sincroniza com o Obsidian
-Exec=$REPO_DIR/.venv/bin/python $REPO_DIR/capture_mobile_token.py %u
+Exec=$REPO_DIR/.venv/bin/moodle-mcp-token-catcher %u
 Terminal=false
 Type=Application
 MimeType=x-scheme-handler/moodlemobile;

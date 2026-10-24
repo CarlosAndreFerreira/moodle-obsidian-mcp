@@ -21,21 +21,108 @@ Servidor **Model Context Protocol (MCP)** em Python (`FastMCP`) desenhado para e
 
 ---
 
-## 🚀 Instalação Rápida (Linux)
+## 🚀 Instalação
+
+O pacote tem um entrypoint (`moodle-mcp`), pelo que a mesma linha serve em Linux,
+macOS e Windows e em qualquer cliente MCP.
+
+```bash
+uvx --from git+https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp moodle-mcp --show-config
+```
+
+Ou a partir de um clone:
 
 ```bash
 git clone git@github.com:CarlosAndreFerreira/moodle-obsidian-mcp.git
 cd moodle-obsidian-mcp
+uv pip install -e ".[pdf]"
+```
+
+O extra `[pdf]` acrescenta a extração de texto de PDFs via PyMuPDF. Fica de fora
+da instalação base porque o PyMuPDF é AGPL-3.0: sem ele, tudo o resto funciona e
+os downloads de PDF apenas não geram o `.md` acompanhante.
+
+Para registar o handler `moodlemobile://` em Linux (captura de token via SSO):
+
+```bash
 bash install.sh ~/Doutoramento
 ```
 
-### Autenticação Automática via Browser (1 Clique)
-1. Faz login normalmente no Moodle da tua universidade no navegador (ex.: `https://elearning.uab.pt` com conta UTAD/federada).
+### Configuração
+
+Nada é obrigatório: há omissões para tudo. A configuração é lida por camadas, da
+maior precedência para a menor:
+
+1. **Variáveis de ambiente** — é por aqui que os clientes MCP injetam opções
+   (`env` no Claude Code, `environment` no opencode).
+2. **`config.toml`** no diretório de configuração do utilizador.
+3. **`credentials.json`** no mesmo diretório — só tokens, com permissões `0600`.
+4. **`.env`** ao lado do código — legado, ainda lido, migrado na primeira escrita.
+
+O diretório é o do sistema operativo: `~/.config/moodle-mcp` (Linux),
+`~/Library/Application Support/moodle-mcp` (macOS),
+`%LOCALAPPDATA%\moodle-mcp` (Windows). Não fica junto ao código porque, instalado
+com `uvx` ou `pipx`, o pacote corre de uma cache efémera e possivelmente só de
+leitura.
+
+```bash
+moodle-mcp --show-config      # onde tudo é lido, sem revelar segredos
+moodle-mcp --list-toolsets    # que ferramentas cada toolset expõe
+```
+
+### Toolsets
+
+As 32 ferramentas custam ~8 500 tokens de contexto em cada pedido. Expor só o que
+usas corta isso para menos de metade:
+
+| `--tools` | Tools | ~tokens |
+|:---|--:|--:|
+| (omissão) | 31 | 8 225 |
+| `core,obsidian` | 15 | 4 321 |
+| `core` | 11 | 2 793 |
+
+`core` é sempre incluído. `raw` (a ferramenta que chama qualquer função da API,
+escrita incluída) fica de fora da omissão e tem de ser pedido explicitamente.
+
+### Configuração nos clientes
+
+**Claude Code / Claude Desktop** (`mcpServers`):
+
+```json
+{
+  "mcpServers": {
+    "moodle-uab": {
+      "command": "moodle-mcp",
+      "args": ["--tools", "core,obsidian"],
+      "env": { "MOODLE_URL": "https://elearning.uab.pt" }
+    }
+  }
+}
+```
+
+**opencode** (`opencode.json`; chave `mcp`, `command` como array, `environment`):
+
+```json
+{
+  "mcp": {
+    "moodle": {
+      "type": "local",
+      "command": ["moodle-mcp", "--tools", "core,obsidian"],
+      "environment": { "MOODLE_URL": "https://elearning.uab.pt" },
+      "enabled": true
+    }
+  }
+}
+```
+
+### Autenticação via Browser (1 clique)
+1. Faz login normalmente no Moodle da tua universidade no navegador.
 2. Abre no mesmo navegador:
    ```text
    https://elearning.uab.pt/admin/tool/mobile/launch.php?service=moodle_mobile_app&passport=12345
    ```
-3. Aceita o pop-up **"Abrir Moodle Mobile Token Catcher"** — o token é extraído, guardado localmente no `.env` (ignorado pelo Git) e o teu cofre do Obsidian é sincronizado de imediato!
+3. Aceita o pop-up **"Abrir Moodle Mobile Token Catcher"** — o token é extraído,
+   guardado em `credentials.json` e o Vault é sincronizado de imediato.
 
 ---
 
