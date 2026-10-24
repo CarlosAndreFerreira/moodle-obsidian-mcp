@@ -1,7 +1,9 @@
+import argparse
 import base64
 import hashlib
 import html
 import json
+import logging
 import os
 import re
 import shutil
@@ -10,6 +12,7 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any, Optional
+import sys
 from urllib.parse import parse_qs, urlparse
 
 import pymupdf as fitz  # PyMuPDF
@@ -1467,5 +1470,232 @@ def sync_doctoral_dashboard_to_obsidian(
     }
 
 
-if __name__ == "__main__":
+# ==============================================================================
+# TOOLSETS E ARRANQUE
+# ==============================================================================
+
+logger = logging.getLogger("moodle-mcp")
+
+#: Agrupamento das ferramentas. Expor as 32 custa ~9 500 tokens de contexto em
+#: cada pedido, o que degrada a escolha de ferramenta em modelos pequenos e locais.
+#: Um perfil reduzido (`--tools core,obsidian`) corta esse custo para menos de
+#: metade sem perder o fluxo principal de sincronização para o Obsidian.
+TOOLSETS: dict[str, tuple[str, ...]] = {
+    "core": (
+        "set_moodle_token",
+        "decode_mobile_launch_token",
+        "extract_token_from_session_cookie",
+        "get_site_info",
+        "get_enrolled_courses",
+        "get_course_contents",
+        "get_course_pages_and_books",
+        "get_activities_completion_status",
+        "get_course_participants",
+        "get_calendar_events",
+        "get_messages",
+    ),
+    "grades": (
+        "get_assignments",
+        "get_assignment_submission",
+        "get_course_grades",
+        "get_all_grades_overview",
+        "get_course_quizzes",
+    ),
+    "forums": (
+        "get_course_forums",
+        "get_forum_discussions",
+        "get_discussion_posts",
+        "search_all_course_forums",
+    ),
+    "obsidian": (
+        "download_moodle_file",
+        "download_all_course_materials_to_obsidian",
+        "export_forum_discussions_to_obsidian",
+        "sync_doctoral_dashboard_to_obsidian",
+    ),
+    "write": (
+        "toggle_activity_completion",
+        "upload_file_to_draft",
+        "save_assignment_submission",
+        "add_submission_comment",
+        "reply_to_forum_post",
+        "create_forum_discussion",
+        "send_instant_message",
+    ),
+    "raw": ("call_any_moodle_wsfunction",),
+}
+
+#: Ativos por omissão. `raw` fica de fora: o `call_any_moodle_wsfunction` dá
+#: acesso total à API de Web Services, incluindo escrita, e é uma boa ferramenta
+#: de diagnóstico mas má para estar sempre ligada.
+DEFAULT_TOOLSETS = ("core", "grades", "forums", "obsidian", "write")
+
+
+def _iter_registered_tools() -> list[Any]:
+    """Devolve os objetos `Tool` registados no servidor.
+
+    O FastMCP 1.30 não expõe um acessor síncrono para as ferramentas registadas
+    (`FastMCP.list_tools()` é assíncrono e devolve o tipo do protocolo, sem o
+    dicionário de schema mutável). O acesso ao gestor interno fica contido nesta
+    função para que uma mudança de API do SDK tenha um único ponto de correção.
+
+    Returns:
+        A lista de ferramentas, ou uma lista vazia se o SDK mudar de estrutura.
+    """
+    try:
+        return list(mcp._tool_manager.list_tools())
+    except AttributeError:  # pragma: no cover - depende da versão do SDK
+        logger.warning("Não foi possível inspecionar as ferramentas registadas.")
+        return []
+
+
+def strip_schema_titles() -> int:
+    """Remove os `title` que o Pydantic gera a partir dos nomes dos campos.
+
+    O Pydantic emite `"title": "Cmid"` para um campo `cmid`, o que não acrescenta
+    nada ao que o nome e a descrição já dizem e custa ~570 tokens no conjunto das
+    32 ferramentas.
+
+    Returns:
+        O número de chaves `title` removidas.
+    """
+    removed = 0
+    for tool in _iter_registered_tools():
+        schema = getattr(tool, "parameters", None)
+        if not isinstance(schema, dict):
+            continue
+        removed += 1 if schema.pop("title", None) is not None else 0
+        for field_schema in schema.get("properties", {}).values():
+            if isinstance(field_schema, dict):
+                removed += 1 if field_schema.pop("title", None) is not None else 0
+    return removed
+
+
+def resolve_toolsets(spec: str) -> set[str]:
+    """Interpreta uma especificação `--tools` e devolve os toolsets a ativar.
+
+    Args:
+        spec: Lista separada por vírgulas, `"all"` para todos, ou vazio para a
+            seleção por omissão.
+
+    Returns:
+        O conjunto de nomes de toolset a ativar.
+
+    Raises:
+        ValueError: Se algum nome não existir em `TOOLSETS`.
+    """
+    spec = spec.strip()
+    if not spec:
+        return set(DEFAULT_TOOLSETS)
+    if spec.lower() == "all":
+        return set(TOOLSETS)
+
+    requested = {part.strip().lower() for part in spec.split(",") if part.strip()}
+    unknown = sorted(requested - set(TOOLSETS))
+    if unknown:
+        raise ValueError(
+            f"Toolset(s) desconhecido(s): {', '.join(unknown)}. Disponíveis: {', '.join(TOOLSETS)}."
+        )
+    if "core" not in requested:
+        # Sem `core` não há autenticação nem listagem de disciplinas, pelo que
+        # nenhuma das outras ferramentas teria por onde começar.
+        logger.info("A acrescentar o toolset 'core', necessário a todos os outros.")
+        requested.add("core")
+    return requested
+
+
+def apply_toolsets(enabled: set[str]) -> list[str]:
+    """Retira do servidor as ferramentas que não pertencem aos toolsets ativos.
+
+    As funções Python continuam a existir e a ser chamáveis internamente — o
+    `sync_doctoral_dashboard_to_obsidian` compõe várias delas — mas deixam de ser
+    anunciadas ao cliente, e por isso de ocupar contexto.
+
+    Args:
+        enabled: Nomes dos toolsets a manter.
+
+    Returns:
+        Os nomes das ferramentas retiradas, por ordem alfabética.
+    """
+    removed: list[str] = []
+    for toolset, tool_names in TOOLSETS.items():
+        if toolset in enabled:
+            continue
+        for tool_name in tool_names:
+            try:
+                mcp.remove_tool(tool_name)
+                removed.append(tool_name)
+            except Exception as exc:  # pragma: no cover - nome inexistente
+                logger.warning("Não foi possível retirar '%s': %s", tool_name, exc)
+    return sorted(removed)
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Ponto de entrada do servidor MCP.
+
+    Args:
+        argv: Argumentos de linha de comandos; `None` usa `sys.argv`.
+
+    Returns:
+        O código de saída do processo.
+    """
+    # stdout é o canal JSON-RPC do transporte stdio: qualquer escrita nele
+    # corrompe o protocolo. Todo o diagnóstico vai para stderr.
+    logging.basicConfig(
+        stream=sys.stderr,
+        level=os.getenv("MOODLE_MCP_LOG_LEVEL", "INFO").upper(),
+        format="%(levelname)s [%(name)s] %(message)s",
+    )
+
+    parser = argparse.ArgumentParser(
+        prog="moodle-mcp",
+        description="Servidor MCP para Moodle com sincronização para o Obsidian.",
+    )
+    parser.add_argument(
+        "--tools",
+        default=os.getenv("MOODLE_MCP_TOOLS", ""),
+        metavar="A,B,C",
+        help=(
+            "Toolsets a expor, separados por vírgulas: "
+            f"{', '.join(TOOLSETS)}. 'all' expõe todos. "
+            f"Omissão: {','.join(DEFAULT_TOOLSETS)} "
+            "(também configurável por MOODLE_MCP_TOOLS)."
+        ),
+    )
+    parser.add_argument(
+        "--list-toolsets",
+        action="store_true",
+        help="Lista os toolsets e as ferramentas de cada um, e termina.",
+    )
+    args = parser.parse_args(argv)
+
+    if args.list_toolsets:
+        for toolset, tool_names in TOOLSETS.items():
+            marca = "*" if toolset in DEFAULT_TOOLSETS else " "
+            print(f"{marca} {toolset} ({len(tool_names)})")
+            for tool_name in tool_names:
+                print(f"      {tool_name}")
+        print("\n* = ativo por omissão")
+        return 0
+
+    try:
+        enabled = resolve_toolsets(args.tools)
+    except ValueError as exc:
+        parser.error(str(exc))
+
+    removed = apply_toolsets(enabled)
+    titles = strip_schema_titles()
+    logger.info(
+        "Toolsets ativos: %s | %d ferramentas expostas (%d retiradas, %d titles removidos)",
+        ",".join(sorted(enabled)),
+        len(_iter_registered_tools()),
+        len(removed),
+        titles,
+    )
+
     mcp.run(transport="stdio")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
