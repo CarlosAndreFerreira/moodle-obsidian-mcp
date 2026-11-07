@@ -57,16 +57,17 @@ def handle_url(url: str) -> None:
             return
         site_info = res.get("validation", {}).get("site_info", {})
         user = site_info.get("fullname", "Utilizador")
-        sync_res = moodle_mcp.sync_doctoral_dashboard_to_obsidian(
+        instance = str(res.get("instance") or moodle_mcp.DEFAULT_INSTANCE)
+        sync_res = moodle_mcp.sync_dashboard(
             download_materials=False,
             export_forums=True,
-            instance=moodle_mcp.DEFAULT_INSTANCE,
+            instance=instance,
         )
         # Nem o token nem a sua impressão digital entram no registo.
         config.write_private(
             target,
             f"[{stamp}] OK\n"
-            f"Instância: {moodle_mcp.DEFAULT_INSTANCE}\n"
+            f"Instância: {instance}\n"
             f"Utilizador: {user}\n"
             f"Disciplinas sincronizadas: {sync_res.get('courses_synced', 0)}\n",
         )

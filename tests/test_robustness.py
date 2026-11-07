@@ -242,7 +242,7 @@ def test_course_pages_no_longer_overwrite_each_other(vault, monkeypatch):
         responses.get(page.format(n), body=f"<p>página {n}</p>")
     responses.get(FILE, body=b"%PDF")
 
-    result = server.download_all_course_materials_to_obsidian(5, extract_pdfs=False, instance="test")
+    result = server.download_course_materials(5, extract_pdfs=False, instance="test")
 
     folder = vault / "Unidades Curriculares" / "UC" / "Materiais" / "Tema 1"
     assert sorted(p.name for p in folder.iterdir()) == [
@@ -299,7 +299,7 @@ def fake_moodle(monkeypatch, vault):
 def test_sync_isolates_failing_courses_and_reports_them(fake_moodle, vault):
     fake_moodle["mod_quiz_get_quizzes_by_courses"] = server.MoodleAPIError("accessexception", "sem acesso")
 
-    result = server.sync_doctoral_dashboard_to_obsidian(instance="test")
+    result = server.sync_dashboard(instance="test")
 
     assert result["status"] == "parcial"
     assert result["courses_synced"] == 2 and result["courses_total"] == 3
@@ -315,4 +315,4 @@ def test_sync_isolates_failing_courses_and_reports_them(fake_moodle, vault):
 def test_sync_stops_on_fatal_errors(fake_moodle):
     fake_moodle["mod_choice_get_choices_by_courses"] = server.MoodleAPIError("invalidtoken", "token")
     with pytest.raises(server.MoodleAPIError):
-        server.sync_doctoral_dashboard_to_obsidian(instance="test")
+        server.sync_dashboard(instance="test")

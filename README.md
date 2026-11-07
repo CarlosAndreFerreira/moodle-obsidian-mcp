@@ -165,6 +165,16 @@ um cliente as pode auto-aprovar sem auto-aprovar nada irreversível.
 * **Nada se sobrescreve por acidente:** ficheiros, páginas, fóruns e UCs com o
   mesmo nome ganham ` (2)`, ` (3)`…; as páginas do Moodle (`index.html`) ficam com
   o nome do módulo. Os nomes são válidos em Windows, macOS e Linux.
+* **Falhas transitórias não param nada:** as leituras repetem com backoff em
+  429/5xx e falhas de ligação (respeitando `Retry-After`); as escritas nunca
+  repetem depois de o servidor as ter recebido, para não publicar duas vezes.
+  As ligações são reutilizadas (keep-alive).
+* **O servidor não bloqueia:** sincronização, download de materiais e exportação
+  de fóruns correm numa thread e reportam progresso por UC ao cliente.
+* **Organização do Vault:** `MOODLE_MCP_SYNC_SUBDIR` põe o painel e
+  `Unidades Curriculares/` numa subpasta (as ligações acompanham), e
+  `MOODLE_MCP_DASHBOARD_NAME` muda o nome do painel. Com várias instâncias, cada
+  uma tem o seu painel (`<nome> (<instância>)`).
 * **Downloads atómicos e com limite:** um download que falhe deixa o ficheiro
   anterior intacto, e nenhum ficheiro passa de `MOODLE_MCP_MAX_DOWNLOAD_MB` (500).
 * **Segredos:** `credentials.json` e `last_auth.log` são escritos de forma
@@ -237,12 +247,20 @@ ferramentas de escrita continuam desligadas por omissão.
 
 ### Autenticação via Browser (1 clique)
 1. Faz login normalmente no Moodle da tua universidade no navegador.
-2. Abre no mesmo navegador:
-   ```text
-   https://elearning.uab.pt/admin/tool/mobile/launch.php?service=moodle_mobile_app&passport=12345
+2. Corre:
+   ```bash
+   moodle-mcp --login            # ou: moodle-mcp --login utad
    ```
-3. Aceita o pop-up **"Abrir Moodle Mobile Token Catcher"** — o token é extraído,
-   guardado em `credentials.json` e o Vault é sincronizado de imediato.
+   O comando abre no navegador um link de login com um *passport* aleatório,
+   de uso único e válido durante 15 minutos (`--no-browser` só o mostra).
+3. Aceita o pop-up **"Abrir Moodle Token Catcher"** — o token é verificado,
+   guardado em `credentials.json` na instância certa e o Vault é sincronizado
+   de imediato. O resultado fica em `last_auth.log`, no diretório de configuração.
+
+O handler só aceita a resposta a um login iniciado assim: o Moodle assina-a
+com `md5(wwwroot . passport)`, e o handler confirma essa assinatura. O link
+antigo com `passport=12345` deixou de funcionar, porque permitia a qualquer
+página web substituir o teu token pelo de outra conta.
 
 ---
 

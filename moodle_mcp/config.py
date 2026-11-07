@@ -65,6 +65,10 @@ SETTINGS: dict[str, tuple[str, str]] = {
     "confirm_writes": ("MOODLE_MCP_CONFIRM_WRITES", "always"),
     # Tamanho máximo de um ficheiro descarregado, em MB.
     "max_download_mb": ("MOODLE_MCP_MAX_DOWNLOAD_MB", "500"),
+    # Subpasta do Vault para o painel e "Unidades Curriculares" (vazio = raiz).
+    "sync_subdir": ("MOODLE_MCP_SYNC_SUBDIR", ""),
+    # Nome da nota do painel (sem .md); com várias instâncias ganha " (<instância>)".
+    "dashboard_name": ("MOODLE_MCP_DASHBOARD_NAME", "Doutoramento - Painel Moodle"),
 }
 
 #: Opções secretas, guardadas em `credentials.json` em vez de `config.toml`.
