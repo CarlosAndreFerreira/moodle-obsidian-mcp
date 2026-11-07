@@ -29,7 +29,7 @@ dependencies = [
 # O PyMuPDF é AGPL-3.0 e é viral: fica como extra para que instalar o servidor
 # não imponha a licença a quem não precise da extração de texto de PDFs.
 pdf = ["pymupdf>=1.24.0"]
-dev = ["pytest>=8.0", "responses>=0.25", "ruff>=0.6", "mypy>=1.11"]
+dev = ["pytest>=8.0", "responses>=0.26.3", "ruff>=0.6", "mypy>=1.11"]
 
 [project.scripts]
 moodle-mcp = "moodle_mcp.server:main"
