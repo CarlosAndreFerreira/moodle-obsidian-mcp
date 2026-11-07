@@ -8,7 +8,7 @@ Decisões de segurança que atravessam o módulo:
 
 * `_redact_secrets` corre em `_moodle_call`, o único ponto de passagem HTTP, para
   que nenhuma credencial devolvida pelo Moodle chegue ao modelo.
-* `_resolve_in_vault` confina toda a leitura e escrita de ficheiros ao Vault.
+* `vault.resolve_in_vault` confina toda a leitura e escrita de ficheiros ao Vault.
 * Nenhum parâmetro usa `Optional[...]`, por compatibilidade de schema com os
   vários providers de LLM.
 
@@ -21,7 +21,6 @@ import base64
 import binascii
 import functools
 import hashlib
-import html
 import json
 import logging
 import os
@@ -38,14 +37,13 @@ import anyio.from_thread
 import anyio.to_thread
 import requests
 from bs4 import BeautifulSoup
-from markdownify import markdownify as md_convert
-from mcp import types as mcp_types
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import ToolAnnotations
-from pydantic import BaseModel, Field
-from urllib3.util import Retry, parse_url
+from pydantic import Field
+from urllib3.util import parse_url
 
-from moodle_mcp import __version__, config, handler, login, sanitize
+from moodle_mcp import __version__, config, confirm, handler, login, sanitize, transport, vault
+from moodle_mcp.transport import MoodleRequestError
 
 try:  # O PyMuPDF é AGPL-3.0 e fica no extra `[pdf]`; sem ele tudo o resto funciona.
     import pymupdf as fitz
@@ -54,7 +52,6 @@ except ImportError:  # pragma: no cover
 
 mcp = FastMCP("Moodle & Obsidian MCP Server")
 
-OBSIDIAN_VAULT_DIR = os.path.expanduser(config.get("obsidian_vault_dir"))
 
 #: Nome da instância usada quando a ferramenta não recebe outra. Resolvido no
 #: arranque para que apareça como omissão na schema que o cliente recebe.
@@ -114,44 +111,6 @@ def _token_fingerprint(token: str) -> str:
     if not token:
         return ""
     return "sha256:" + hashlib.sha256(token.encode("utf-8")).hexdigest()[:12]
-
-
-def _vault_root() -> Path:
-    """Devolve a raiz canónica do Vault do Obsidian (único diretório gravável)."""
-    return Path(OBSIDIAN_VAULT_DIR).expanduser().resolve()
-
-
-def _resolve_in_vault(candidate: Any) -> Path:
-    """Resolve um caminho e recusa qualquer um que escape ao Vault do Obsidian.
-
-    Os nomes de ficheiro e os `fileurl` vêm do servidor Moodle e os caminhos de
-    destino são escolhidos pelo modelo, pelo que uma página de curso manipulada
-    poderia de outra forma dirigir uma escrita para `~/.ssh/authorized_keys` ou
-    `~/.config/autostart/`. `resolve()` segue symlinks, pelo que um link dentro do
-    Vault a apontar para fora também é apanhado.
-
-    Args:
-        candidate: Caminho absoluto ou relativo (relativo resolve a partir da raiz
-            do Vault).
-
-    Returns:
-        O caminho absoluto canónico, garantidamente dentro do Vault.
-
-    Raises:
-        ValueError: Se o caminho resolvido ficar fora do Vault.
-    """
-    root = _vault_root()
-    raw = Path(str(candidate)).expanduser()
-    if not raw.is_absolute():
-        raw = root / raw
-    target = raw.resolve()
-    if target != root and not target.is_relative_to(root):
-        raise ValueError(
-            f"Acesso recusado: '{target}' está fora do Vault do Obsidian ('{root}'). "
-            "Por segurança, o servidor só lê e escreve ficheiros dentro do Vault; "
-            "para mudar de Vault, altera OBSIDIAN_VAULT_DIR na configuração."
-        )
-    return target
 
 
 # ==============================================================================
@@ -256,313 +215,6 @@ def _resolve_target(instance: str = "") -> tuple[str, str]:
     return target.url, target.token
 
 
-class MoodleRequestError(RuntimeError):
-    """Um pedido HTTP ao Moodle falhou.
-
-    A mensagem tem só o método, o caminho e o código HTTP. O `requests` põe o
-    URL completo, com a query, no texto de `HTTPError` e `ConnectionError`, e o
-    token vai na query dos downloads; como o texto das exceções chega ao modelo
-    (e ao histórico da sessão), nunca pode transportar o URL.
-    """
-
-
-#: Base do backoff exponencial entre tentativas, em segundos.
-_BACKOFF = 0.5
-
-USER_AGENT = f"moodle-mcp/{__version__} (+https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp)"
-
-
-@functools.cache
-def _session(retry: bool) -> requests.Session:
-    """Sessão HTTP partilhada (keep-alive), com ou sem novas tentativas.
-
-    Uma sincronização faz centenas de pedidos ao mesmo servidor: reutilizar a
-    ligação TLS poupa um handshake por pedido, e uma falha transitória (502 de
-    um proxy, 503 de manutenção curta, 429 por excesso de pedidos) deixa de
-    deitar abaixo a sincronização inteira.
-
-    Só pedidos idempotentes repetem depois de o servidor os ter recebido. Uma
-    escrita (enviar mensagem, publicar no fórum) só repete se a ligação nem
-    chegou a ser estabelecida: repetir depois de um 502 podia publicar duas vezes.
-
-    Args:
-        retry: True para leituras; False para escritas.
-
-    Returns:
-        A sessão configurada.
-    """
-    if retry:
-        policy = Retry(
-            total=4,
-            connect=3,
-            read=2,
-            status=3,
-            backoff_factor=_BACKOFF,
-            status_forcelist=(429, 500, 502, 503, 504),
-            allowed_methods=frozenset({"GET", "POST"}),
-            respect_retry_after_header=True,
-            raise_on_status=False,
-        )
-    else:
-        policy = Retry(total=2, connect=2, read=0, status=0, other=0, backoff_factor=_BACKOFF)
-    session = requests.Session()
-    adapter = requests.adapters.HTTPAdapter(max_retries=policy)
-    session.mount("https://", adapter)
-    session.mount("http://", adapter)
-    session.headers["User-Agent"] = USER_AGENT
-    return session
-
-
-def _request(method: str, url: str, *, retry: bool = True, **kwargs: Any) -> requests.Response:
-    """Faz um pedido HTTP e converte qualquer falha numa exceção sem segredos.
-
-    Args:
-        method: Método HTTP.
-        url: URL sem segredos na query (os segredos vão em `params`/`data`).
-        retry: Se repete em falhas transitórias (só para pedidos idempotentes).
-        **kwargs: Passados a `Session.request`.
-
-    Returns:
-        A resposta, já com `raise_for_status()` verificado.
-
-    Raises:
-        MoodleRequestError: Em qualquer falha de rede ou código HTTP de erro.
-    """
-    try:
-        response = _session(retry).request(method, url, **kwargs)
-        response.raise_for_status()
-    except requests.RequestException as exc:
-        status = getattr(getattr(exc, "response", None), "status_code", None)
-        detail = f"HTTP {status}" if status else type(exc).__name__
-        # `from None`: a exceção original tem o URL com o token no texto.
-        raise MoodleRequestError(f"{method.upper()} {urlparse(url).path} falhou: {detail}") from None
-    return response
-
-
-def _json(response: requests.Response) -> Any:
-    """Lê o JSON de uma resposta, com uma mensagem útil quando o Moodle devolve HTML."""
-    try:
-        return response.json()
-    except ValueError:
-        raise MoodleRequestError(
-            f"{urlparse(response.url).path}: a resposta não é JSON (HTTP {response.status_code}). "
-            "O Moodle pode estar em manutenção ou a pedir login no navegador."
-        ) from None
-
-
-#: Caminhos de ficheiro do Moodle aos quais o token pode ser acrescentado.
-_FILE_ENDPOINTS = ("/webservice/pluginfile.php/", "/tokenpluginfile.php/", "/pluginfile.php/")
-
-_DEFAULT_PORTS = {"https": 443, "http": 80}
-
-
-def _validate_file_url(file_url: str, base_url: str) -> str:
-    """Garante que um URL de ficheiro pertence à instância Moodle configurada.
-
-    O URL é interpretado depois de preparado pelo `requests`, ou seja, pelo
-    mesmo parser que vai abrir a ligação. Comparar com o `urlparse` não chega:
-    para `https://evil.example\\@moodle/x` o `urlparse` lê o anfitrião
-    `moodle`, mas o `requests` liga-se a `evil.example`.
-
-    Args:
-        file_url: O `fileurl` recebido (da API do Moodle ou do modelo).
-        base_url: URL base da instância.
-
-    Returns:
-        O URL tal como o `requests` o vai enviar.
-
-    Raises:
-        ValueError: Se o esquema, o anfitrião, a porta ou o caminho não forem
-            os de um ficheiro desta instância.
-    """
-    refused = ValueError(
-        "Recusado: o URL não é um ficheiro (pluginfile.php) da instância Moodle configurada "
-        f"({base_url or 'sem URL'}); o token só é enviado para essa instância. Se o Moodle usa "
-        "outro endereço (http/https, www.), corrige o URL da instância na configuração."
-    )
-    try:
-        prepared = requests.Request("GET", file_url.strip()).prepare().url or ""
-        target, base = parse_url(prepared), parse_url(base_url)
-    except (requests.RequestException, ValueError):
-        raise refused from None
-
-    def host(parsed: Any) -> str:
-        return (parsed.host or "").rstrip(".").lower()
-
-    def port(parsed: Any) -> int | None:
-        return parsed.port or _DEFAULT_PORTS.get(parsed.scheme or "")
-
-    if (
-        not host(base)
-        or target.auth
-        or target.scheme != base.scheme
-        or host(target) != host(base)
-        or port(target) != port(base)
-    ):
-        raise refused
-
-    path = target.path or ""
-    if ".." in unquote(path).split("/"):
-        raise refused
-    base_path = (base.path or "").rstrip("/")
-    if not any(path.startswith(base_path + endpoint) for endpoint in _FILE_ENDPOINTS):
-        raise refused
-    return prepared
-
-
-def _authed_get(file_url: str, instance: str, **kwargs: Any) -> requests.Response:
-    """Descarrega um ficheiro autenticado do Moodle — único sítio onde o token vai num URL.
-
-    Valida o URL contra a instância antes de juntar o token, e passa-o em
-    `params` (nunca concatenado). Um redirecionamento não leva o token: o
-    `requests` constrói o pedido seguinte a partir do `Location`.
-
-    Args:
-        file_url: O `fileurl` devolvido pela API do Moodle.
-        instance: Nome da instância.
-        **kwargs: Passados a `requests.request` (`stream`, `timeout`, ...).
-
-    Returns:
-        A resposta HTTP.
-
-    Raises:
-        ValueError: Se o URL não pertencer à instância ou não houver token.
-        MoodleRequestError: Se o pedido falhar.
-    """
-    base_url, token = _resolve_target(instance)
-    if not token:
-        raise ValueError(f"Token para '{instance}' não está configurado.")
-    url = _validate_file_url(file_url, base_url)
-    return _request("GET", url, params={"token": token}, **kwargs)
-
-
-# ==============================================================================
-# CONFIRMAÇÃO HUMANA DAS AÇÕES NO MOODLE
-#
-# Nenhum modelo resiste de forma fiável a instruções escondidas em conteúdo que
-# lê (OWASP LLM01), e os posts de fórum são escritos por qualquer participante
-# da disciplina. As anotações `destructiveHint` só sugerem ao cliente que
-# pergunte, e muitos clientes estão configurados para aprovar tudo. Por isso é
-# o servidor que pede a confirmação, por elicitation (spec MCP 2025-06-18),
-# mostrando ao estudante o destinatário e o texto exatos — o que é preciso para
-# reparar numa ação que não pediu.
-# ==============================================================================
-
-CONFIRM_MODES = ("always", "untrusted", "client")
-
-#: Funções que só devolvem dados do próprio estudante ou do site, sem texto
-#: escrito por terceiros. Qualquer outra marca a sessão como exposta a
-#: conteúdo não confiável.
-_TRUSTED_WSFUNCTIONS = frozenset(
-    {
-        "core_webservice_get_site_info",
-        "core_course_get_enrolled_courses_by_timeline_classification",
-        "core_enrol_get_users_courses",
-        "core_completion_get_activities_completion_status",
-        "gradereport_overview_get_course_grades",
-        "core_user_get_users_by_field",
-    }
-)
-
-#: Se o processo já entregou ao modelo conteúdo escrito por terceiros. Com o
-#: transporte stdio cada cliente tem o seu processo, pelo que equivale à sessão.
-_untrusted_content_seen = False
-
-
-def _mark_untrusted_content_seen() -> None:
-    global _untrusted_content_seen
-    _untrusted_content_seen = True
-
-
-def _confirm_mode() -> str:
-    mode = (config.get("confirm_writes") or "always").strip().lower()
-    if mode not in CONFIRM_MODES:
-        logger.warning("MOODLE_MCP_CONFIRM_WRITES='%s' inválido; a usar 'always'.", mode)
-        return "always"
-    return mode
-
-
-class _Confirmation(BaseModel):
-    """Resposta do utilizador ao pedido de confirmação."""
-
-    confirmar: bool = Field(description="Marca para autorizar esta ação na tua conta do Moodle.")
-
-
-_MAX_SHOWN = 4000
-
-
-def _shown(value: Any) -> str:
-    text = str(value)
-    if len(text) <= _MAX_SHOWN:
-        return text
-    return f"{text[:_MAX_SHOWN]}… (+{len(text) - _MAX_SHOWN} caracteres não mostrados)"
-
-
-async def _require_confirmation(ctx: Context | None, action: str, details: dict[str, Any]) -> None:
-    """Pede ao utilizador, e não ao modelo, que confirme uma ação no Moodle.
-
-    Modos (`MOODLE_MCP_CONFIRM_WRITES`):
-
-    * `always` (omissão): pede sempre.
-    * `untrusted`: pede só depois de a sessão ter lido conteúdo de terceiros
-      (posts, páginas, mensagens), que é quando uma injeção pode ter entrado.
-    * `client`: não pede; confia na aprovação do cliente MCP. Para clientes sem
-      elicitation, e com aviso no arranque.
-
-    Falha em fechado: se for preciso confirmar e o cliente não o suportar, a
-    ação é recusada.
-
-    Args:
-        ctx: O contexto MCP injetado na ferramenta.
-        action: Descrição curta da ação, mostrada no topo do pedido.
-        details: Campos a mostrar, com os valores exatos que vão ser enviados.
-
-    Raises:
-        PermissionError: Se a confirmação não for possível ou for recusada.
-    """
-    mode = _confirm_mode()
-    if mode == "client" or (mode == "untrusted" and not _untrusted_content_seen):
-        return
-
-    hint = (
-        "Para usar ferramentas de escrita num cliente sem elicitation, define "
-        "MOODLE_MCP_CONFIRM_WRITES=client (a aprovação passa a depender só do cliente)."
-    )
-    try:
-        session = ctx.session if ctx is not None else None
-        supported = session is not None and session.check_client_capability(
-            mcp_types.ClientCapabilities(elicitation=mcp_types.ElicitationCapability())
-        )
-    except Exception:  # sem pedido ativo (chamada interna) ou SDK diferente
-        supported = False
-    if not supported or ctx is None:
-        raise PermissionError(
-            "Ação recusada: esta ação no Moodle exige confirmação do utilizador e o cliente MCP "
-            f"não suporta pedidos de confirmação (elicitation). {hint}"
-        )
-
-    lines = [f"⚠️ {action}", ""]
-    lines += [f"• {name}: {_shown(value)}" for name, value in details.items()]
-    lines += [
-        "",
-        "Esta ação é feita na tua conta do Moodle e não pode ser desfeita.",
-        "Confirma só se foste tu a pedi-la — instruções escondidas em posts ou páginas "
-        "podem levar o assistente a propor ações que não pediste.",
-    ]
-    try:
-        result = await ctx.elicit(message="\n".join(lines), schema=_Confirmation)
-    except Exception as exc:
-        raise PermissionError(f"Ação recusada: o pedido de confirmação falhou ({exc}). {hint}") from None
-    if result.action != "accept" or not getattr(result.data, "confirmar", False):
-        raise PermissionError(
-            "Ação cancelada: o utilizador não a confirmou. Não voltes a tentar sem um novo pedido explícito."
-        )
-
-
-#: Funções de leitura pelo nome (convenção da API do Moodle); as restantes podem escrever.
-_READ_ONLY_WSFUNCTION = re.compile(r"_(get|search|list|count|check)_|_(get|search|list)$")
-
-
 def _describe_user(user_id: int, instance: str) -> str:
     """Devolve `"<id> (<nome>)"` para o pedido de confirmação, ou só o id se falhar.
 
@@ -598,16 +250,16 @@ def _ws_call(
 
     url = f"{base_url}/webservice/rest/server.php"
     # Só leituras repetem: uma escrita repetida depois de um 502 podia duplicar.
-    retry = wsfunction in _TRUSTED_WSFUNCTIONS or bool(_READ_ONLY_WSFUNCTION.search(wsfunction))
+    retry = wsfunction in confirm.TRUSTED_WSFUNCTIONS or bool(confirm.READ_ONLY_WSFUNCTION.search(wsfunction))
     if method.upper() == "GET":
-        response = _request("GET", url, params=payload, timeout=30, retry=retry)
+        response = transport.request("GET", url, params=payload, timeout=30, retry=retry)
     else:
-        response = _request("POST", url, data=payload, timeout=30, retry=retry)
-    if wsfunction not in _TRUSTED_WSFUNCTIONS:
-        _mark_untrusted_content_seen()
+        response = transport.request("POST", url, data=payload, timeout=30, retry=retry)
+    if wsfunction not in confirm.TRUSTED_WSFUNCTIONS:
+        confirm.mark_untrusted_content_seen()
     # Redação de segredos e limpeza de conteúdo escondido no único ponto por
     # onde passam todas as respostas da API.
-    return sanitize.clean_payload(_redact_secrets(_json(response)))
+    return sanitize.clean_payload(_redact_secrets(transport.json_body(response)))
 
 
 def _moodle_call(
@@ -722,93 +374,6 @@ def _get_current_user_id(instance: str = DEFAULT_INSTANCE) -> int:
     if isinstance(info, dict) and "userid" in info:
         return int(info["userid"])
     raise MoodleAPIError("nouserid", f"O Moodle não devolveu o userid da sessão ({instance}).")
-
-
-def _html_to_markdown(html_text: str) -> str:
-    if not html_text:
-        return ""
-    html_text = sanitize.clean_text(html_text)
-    try:
-        converted = md_convert(html_text, heading_style="ATX").strip()
-        return re.sub(r"\n{3,}", "\n\n", converted)
-    except Exception:
-        clean = re.sub(r"<br\s*/?>", "\n", html_text, flags=re.IGNORECASE)
-        clean = re.sub(r"</p>", "\n\n", clean, flags=re.IGNORECASE)
-        clean = re.sub(r"<[^>]+>", "", clean)
-        return html.unescape(clean).strip()
-
-
-def _yaml(value: Any) -> str:
-    """Valor escalar seguro para frontmatter YAML.
-
-    Uma string JSON é YAML válido: aspas, `:`, `#` e quebras de linha num nome
-    de UC ou de fórum deixam de partir o frontmatter (e as propriedades do
-    Obsidian e as consultas Dataview que dele dependem).
-    """
-    return json.dumps(str(value), ensure_ascii=False)
-
-
-def _cell(value: Any) -> str:
-    """Texto seguro para uma célula de tabela Markdown (sem `|` nem quebras de linha)."""
-    return re.sub(r"\s*\n\s*", " ", str(value)).replace("|", "\\|")
-
-
-def _write_note(path: Path, markdown: str) -> None:
-    """Escreve uma nota no Vault com o conteúdo ativo do Obsidian desativado.
-
-    Todas as notas geradas a partir do Moodle passam por aqui: incluem nomes,
-    posts e descrições escritos por terceiros, e um bloco `dataviewjs` ou uma
-    imagem remota num post não pode executar código nem chamar um servidor
-    quando o estudante abre a nota.
-    """
-    config.atomic_write(path, sanitize.neutralize_markdown(markdown), 0o644)
-
-
-_WINDOWS_RESERVED = frozenset(
-    {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
-)
-_MAX_NAME = 120
-
-
-def _safe_filename(name: str) -> str:
-    """Converte um nome vindo do Moodle num nome de ficheiro válido em todos os sistemas.
-
-    * Retira separadores, caracteres proibidos no Windows e de controlo.
-    * Recusa `.`/`..`/vazio, que mudariam de diretório ou não teriam nome.
-    * Retira pontos e espaços finais (o Windows descarta-os em silêncio).
-    * Prefixa nomes reservados do Windows (`CON`, `NUL`, `COM1`…), com ou sem extensão.
-    * Trunca o nome, não a extensão: `aula.pdf` com 200 caracteres continua a
-      acabar em `.pdf` e a ter o texto extraído.
-    """
-    # `#^[]` são válidos em ficheiros mas partem as ligações [[...]] do Obsidian.
-    cleaned = re.sub(r'[\\/*?:"<>|#^\[\]\x00-\x1f\x7f]+', "-", str(name))
-    cleaned = re.sub(r"\s+", " ", cleaned).strip().rstrip(". ")
-    if not cleaned.strip("."):
-        return "_"
-    stem, dot, suffix = cleaned.rpartition(".")
-    if not dot or not stem or len(suffix) > 10 or " " in suffix:
-        stem, suffix = cleaned, ""
-    if len(cleaned) > _MAX_NAME:
-        keep = _MAX_NAME - (len(suffix) + 1 if suffix else 0)
-        stem = stem[:keep].rstrip(". ")
-        cleaned = f"{stem}.{suffix}" if suffix else stem
-    if (stem if suffix else cleaned).split(".")[0].upper() in _WINDOWS_RESERVED:
-        cleaned = f"_{cleaned}"
-    return cleaned
-
-
-def _unique_path(path: Path, used: set[Path]) -> Path:
-    """Devolve um caminho ainda não usado nesta execução, com ` (2)`, ` (3)`… se preciso.
-
-    Dois módulos com o mesmo nome (ou todas as páginas `index.html` de uma
-    secção) escreviam no mesmo ficheiro e só o último sobrevivia.
-    """
-    candidate, counter = path, 2
-    while candidate in used:
-        candidate = path.with_name(f"{path.stem} ({counter}){path.suffix}")
-        counter += 1
-    used.add(candidate)
-    return candidate
 
 
 # ==============================================================================
@@ -1090,8 +655,8 @@ async def call_any_moodle_wsfunction(
     (ex.: `core_user_get_users_by_field`, `mod_glossary_get_entries_by_letter`, etc.) passando parâmetros em JSON.
     """
     params = json.loads(params_json) if params_json else {}
-    if not _READ_ONLY_WSFUNCTION.search(wsfunction):
-        await _require_confirmation(
+    if not confirm.READ_ONLY_WSFUNCTION.search(wsfunction):
+        await confirm.require_confirmation(
             ctx,
             "Chamar uma função da API do Moodle que pode alterar dados",
             {
@@ -1207,7 +772,7 @@ async def toggle_activity_completion(
     Marca ou desmarca manualmente uma atividade/recurso da disciplina como concluída (`core_completion_update_activity_completion_status_manually`).
     `cmid` é o ID do módulo do curso (course module id).
     """
-    await _require_confirmation(
+    await confirm.require_confirmation(
         ctx,
         "Marcar atividade como concluída" if completed else "Desmarcar atividade como concluída",
         {"Instância": instance, "cmid": cmid},
@@ -1228,8 +793,14 @@ def get_course_participants(
     """
     Lista os participantes de uma disciplina (professores, tutores e colegas de doutoramento).
     Útil para identificar o ID do professor ou colegas de grupo.
+
+    Devolve só `id`, `fullname`, papéis e grupos. O Moodle devolve também email,
+    último acesso, cidade, país, URLs do perfil e campos personalizados dos
+    colegas; tudo o que uma ferramenta devolve vai para o fornecedor do LLM, e
+    nada disso é preciso para encontrar um professor ou um colega de grupo
+    (minimização de dados, RGPD art. 5.º, n.º 1, alínea c).
     """
-    return _moodle_call(
+    users = _moodle_call(
         "core_enrol_get_enrolled_users",
         {
             "courseid": course_id,
@@ -1238,6 +809,18 @@ def get_course_participants(
         },
         instance=instance,
     )
+    if not isinstance(users, list):
+        return users
+    return [
+        {
+            "id": user.get("id"),
+            "fullname": user.get("fullname"),
+            "roles": [role.get("shortname") for role in user.get("roles") or []],
+            "groups": [group.get("name") for group in user.get("groups") or []],
+        }
+        for user in users
+        if isinstance(user, dict)
+    ]
 
 
 # ==============================================================================
@@ -1272,7 +855,7 @@ def download_moodle_file(
     Se for um PDF e `extract_pdf_to_markdown=True`, extrai todo o texto com
     PyMuPDF para um `.md` ao lado do PDF, pesquisável no Obsidian.
 
-    `dest_path` tem de ficar dentro de `OBSIDIAN_VAULT_DIR`: um caminho relativo
+    `dest_path` tem de ficar dentro de `vault.OBSIDIAN_VAULT_DIR`: um caminho relativo
     resolve a partir da raiz do Vault e qualquer caminho que escape é recusado.
 
     Args:
@@ -1290,7 +873,7 @@ def download_moodle_file(
             ficheiro da instância configurada (o token nunca sai para outro anfitrião).
         MoodleRequestError: Se o download falhar.
     """
-    target = _resolve_in_vault(dest_path)
+    target = vault.resolve_in_vault(dest_path)
     _download_to(target, file_url, instance)
 
     result: dict[str, Any] = {
@@ -1301,14 +884,14 @@ def download_moodle_file(
     if extract_pdf_to_markdown and target.suffix.lower() == ".pdf" and fitz is None:
         result["pdf_extraction_warning"] = (
             "Extração de PDF indisponível: instala o extra com "
-            "`pip install 'moodle-mcp[pdf]'` (PyMuPDF, AGPL-3.0)."
+            "`pip install 'moodle-obsidian-mcp[pdf]'` (PyMuPDF, AGPL-3.0)."
         )
     elif extract_pdf_to_markdown and target.suffix.lower() == ".pdf":
         try:
             doc = fitz.open(str(target))
             md_pages = [
                 "---",
-                f"source_pdf: {_yaml(target.name)}",
+                f"source_pdf: {vault.yaml_scalar(target.name)}",
                 f"pages: {len(doc)}",
                 f"extracted_at: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
                 f"tags: [moodle, pdf-extraido, {instance}]",
@@ -1324,7 +907,7 @@ def download_moodle_file(
             n_pages = len(doc)
             doc.close()
             md_path = target.with_suffix(".pdf.md")
-            _write_note(md_path, "\n".join(md_pages))
+            vault.write_note(md_path, "\n".join(md_pages))
             result["extracted_markdown"] = str(md_path)
             result["pdf_pages"] = n_pages
         except Exception as e:
@@ -1356,7 +939,7 @@ def _download_to(target: Path, file_url: str, instance: str) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp = target.with_name(f".{target.name}.part")
     try:
-        with _authed_get(file_url, instance, stream=True, timeout=60) as r:
+        with transport.authed_get(file_url, instance, stream=True, timeout=60) as r:
             declared = int(r.headers.get("Content-Length") or 0)
             if declared > limit:
                 raise ValueError(f"Ficheiro com {declared} bytes excede o limite de {limit} bytes.")
@@ -1400,7 +983,9 @@ def download_course_materials(
 
     cname = _course_folder_name(course_id, instance)
 
-    base_uc_dir = _resolve_in_vault(_sync_root(vault_dir) / "Unidades Curriculares" / cname / "Materiais")
+    base_uc_dir = vault.resolve_in_vault(
+        _sync_root(vault_dir) / "Unidades Curriculares" / cname / "Materiais"
+    )
     base_uc_dir.mkdir(parents=True, exist_ok=True)
 
     downloaded: list[str] = []
@@ -1408,28 +993,28 @@ def download_course_materials(
     used: set[Path] = set()
 
     for section in contents:
-        sec_name = _safe_filename(section.get("name") or f"Topico_{section.get('section', 0)}")
+        sec_name = vault.safe_filename(section.get("name") or f"Topico_{section.get('section', 0)}")
         sec_dir = base_uc_dir / sec_name
         for mod in section.get("modules", []):
-            mname = _safe_filename(mod.get("name", "Recurso"))
+            mname = vault.safe_filename(mod.get("name", "Recurso"))
             for content_item in mod.get("contents", []):
                 ctype = content_item.get("type")
-                fname = _safe_filename(content_item.get("filename") or f"{mname}.bin")
+                fname = vault.safe_filename(content_item.get("filename") or f"{mname}.bin")
                 furl = content_item.get("fileurl")
                 if ctype == "file" and furl:
                     try:
                         if fname.lower().endswith((".html", ".htm")):
-                            r = _authed_get(furl, instance, timeout=30)
+                            r = transport.authed_get(furl, instance, timeout=30)
                             sec_dir.mkdir(parents=True, exist_ok=True)
                             # Cada página do Moodle chama-se `index.html`: o nome útil é o do módulo.
                             stem = mname if Path(fname).stem.lower() == "index" else Path(fname).stem
-                            md_dest = _unique_path(sec_dir / f"{_safe_filename(stem)}.md", used)
-                            _write_note(md_dest, f"# {mname}\n\n{_html_to_markdown(r.text)}\n")
+                            md_dest = vault.unique_path(sec_dir / f"{vault.safe_filename(stem)}.md", used)
+                            vault.write_note(md_dest, f"# {mname}\n\n{vault.html_to_markdown(r.text)}\n")
                             downloaded.append(str(md_dest))
                         else:
                             res = download_moodle_file(
                                 furl,
-                                str(_unique_path(sec_dir / fname, used)),
+                                str(vault.unique_path(sec_dir / fname, used)),
                                 extract_pdf_to_markdown=extract_pdfs,
                                 instance=instance,
                             )
@@ -1444,15 +1029,19 @@ def download_course_materials(
             if int(c.get("id", 0)) == int(course_id):
                 efolios_dir = base_uc_dir / "Enunciados_Efolios"
                 for a in c.get("assignments", []):
-                    aname = _safe_filename(a.get("name", "Trabalho"))
+                    aname = vault.safe_filename(a.get("name", "Trabalho"))
                     for att in a.get("introattachments", []) + a.get("introfiles", []):
                         furl = att.get("fileurl")
-                        fname = _safe_filename(att.get("filename", "enunciado.pdf"))
+                        fname = vault.safe_filename(att.get("filename", "enunciado.pdf"))
                         if furl:
                             try:
                                 res = download_moodle_file(
                                     furl,
-                                    str(_unique_path(efolios_dir / _safe_filename(f"{aname}_{fname}"), used)),
+                                    str(
+                                        vault.unique_path(
+                                            efolios_dir / vault.safe_filename(f"{aname}_{fname}"), used
+                                        )
+                                    ),
                                     extract_pdf_to_markdown=extract_pdfs,
                                     instance=instance,
                                 )
@@ -1547,7 +1136,7 @@ async def upload_file_to_draft(
 ) -> Any:
     """Envia um ficheiro do Vault para a área de rascunho (draft area) do Moodle.
 
-    `file_path` tem de estar dentro de `OBSIDIAN_VAULT_DIR`: o upload sai da
+    `file_path` tem de estar dentro de `vault.OBSIDIAN_VAULT_DIR`: o upload sai da
     máquina para o servidor da universidade, pelo que ler um caminho arbitrário
     seria um canal de exfiltração (p.ex. `~/.ssh/id_rsa`). Coloca o e-fólio no
     Vault antes de o submeter.
@@ -1566,19 +1155,19 @@ async def upload_file_to_draft(
         ValueError: Se `file_path` cair fora do Vault.
     """
     base_url, token = _resolve_target(instance)
-    path = _resolve_in_vault(file_path)
+    path = vault.resolve_in_vault(file_path)
     if not path.exists():
         return {"error": True, "message": f"Ficheiro não encontrado: {path}"}
 
     if not token:
         return {"error": True, "message": f"Token para '{instance}' não está configurado."}
 
-    await _require_confirmation(
+    await confirm.require_confirmation(
         ctx,
         "Enviar um ficheiro do Vault para o servidor do Moodle",
         {
             "Instância": f"{instance} ({base_url})",
-            "Ficheiro": str(path.relative_to(_vault_root())),
+            "Ficheiro": str(path.relative_to(vault.vault_root())),
             "Tamanho": f"{path.stat().st_size} bytes",
         },
     )
@@ -1592,8 +1181,8 @@ async def upload_file_to_draft(
     }
     with path.open("rb") as f:
         files = {"file_1": (path.name, f)}
-        response = _request("POST", upload_url, data=fields, files=files, timeout=90, retry=False)
-    return sanitize.clean_payload(_redact_secrets(_json(response)))
+        response = transport.request("POST", upload_url, data=fields, files=files, timeout=90, retry=False)
+    return sanitize.clean_payload(_redact_secrets(transport.json_body(response)))
 
 
 @mcp.tool(annotations=_ann("Submeter trabalho / e-fólio", destructive=True, idempotent=False))
@@ -1619,7 +1208,7 @@ async def save_assignment_submission(
     Por segurança, `submit_for_grading=False` guarda em modo rascunho/submissão editável;
     se `submit_for_grading=True`, lacra e submete em definitivo para avaliação.
     """
-    await _require_confirmation(
+    await confirm.require_confirmation(
         ctx,
         "ENTREGAR DEFINITIVAMENTE o trabalho para avaliação (deixa de ser editável)"
         if submit_for_grading
@@ -1669,7 +1258,7 @@ async def add_submission_comment(
     `context_id`: contextid do módulo do trabalho (`cmid` context).
     `item_id`: ID da submissão (`submission.id` obtido em `get_assignment_submission`).
     """
-    await _require_confirmation(
+    await confirm.require_confirmation(
         ctx,
         "Publicar um comentário numa submissão",
         {"Instância": instance, "Contexto": context_id, "Item": item_id, "Comentário": content},
@@ -1752,7 +1341,7 @@ def search_all_course_forums(
             posts = posts_resp.get("posts", []) if isinstance(posts_resp, dict) else []
             for p in posts:
                 subj = p.get("subject", "")
-                msg = _html_to_markdown(p.get("message", ""))
+                msg = vault.html_to_markdown(p.get("message", ""))
                 author = p.get("author", {}).get("fullname", "")
                 if q in subj.lower() or q in msg.lower() or q in dname.lower():
                     matches.append(
@@ -1786,7 +1375,7 @@ async def reply_to_forum_post(
     Envia uma resposta/comentário para um post de fórum (como aluno), com suporte opcional para anexo
     (carregado previamente via `upload_file_to_draft`).
     """
-    await _require_confirmation(
+    await confirm.require_confirmation(
         ctx,
         "Publicar uma resposta num fórum (visível para a turma)",
         {
@@ -1823,7 +1412,7 @@ async def create_forum_discussion(
     ctx: Context = None,  # type: ignore[assignment]  # injetado pelo FastMCP
 ):
     """Cria um novo tópico de discussão num fórum da disciplina (com suporte opcional a anexo e grupo)."""
-    await _require_confirmation(
+    await confirm.require_confirmation(
         ctx,
         "Criar um tópico num fórum (visível para a turma)",
         {
@@ -1857,7 +1446,7 @@ async def send_instant_message(
     ctx: Context = None,  # type: ignore[assignment]  # injetado pelo FastMCP
 ):
     """Envia uma mensagem privada direta no Moodle para um professor ou colega de doutoramento (`core_message_send_instant_messages`)."""
-    await _require_confirmation(
+    await confirm.require_confirmation(
         ctx,
         "Enviar uma mensagem privada no Moodle",
         {"Instância": instance, "Destinatário": _describe_user(to_user_id, instance), "Mensagem": text},
@@ -1946,14 +1535,14 @@ def export_course_forums(
 
     cname = _course_folder_name(course_id, instance)
 
-    foruns_dir = _resolve_in_vault(_sync_root(vault_dir) / "Unidades Curriculares" / cname / "Foruns")
+    foruns_dir = vault.resolve_in_vault(_sync_root(vault_dir) / "Unidades Curriculares" / cname / "Foruns")
     foruns_dir.mkdir(parents=True, exist_ok=True)
 
     exported_files = []
     used: set[Path] = set()
     for f in forums:
         fid = f.get("id")
-        fname = _safe_filename(f.get("name", f"Forum_{fid}"))
+        fname = vault.safe_filename(f.get("name", f"Forum_{fid}"))
         discs_resp = _soft(get_forum_discussions, fid, instance=instance, default={})
         discussions = discs_resp.get("discussions", []) if isinstance(discs_resp, dict) else []
         if not discussions:
@@ -1963,7 +1552,7 @@ def export_course_forums(
             "---",
             f"forum_id: {fid}",
             f"course_id: {course_id}",
-            f"title: {_yaml(fname)}",
+            f"title: {vault.yaml_scalar(fname)}",
             f"tags: [moodle, forum, {instance}]",
             "---",
             "",
@@ -1982,7 +1571,7 @@ def export_course_forums(
                 author = p.get("author", {}).get("fullname", "Utilizador")
                 created = p.get("timecreated", 0)
                 dt_str = datetime.fromtimestamp(created).strftime("%Y-%m-%d %H:%M") if created else ""
-                body = _html_to_markdown(p.get("message", ""))
+                body = vault.html_to_markdown(p.get("message", ""))
                 lines.extend(
                     [
                         f"### 👤 {author} — `{dt_str}` (`post_id: {pid}`)",
@@ -1994,8 +1583,8 @@ def export_course_forums(
                     ]
                 )
 
-        fpath = _unique_path(foruns_dir / f"{fname}.md", used)
-        _write_note(fpath, "\n".join(lines))
+        fpath = vault.unique_path(foruns_dir / f"{fname}.md", used)
+        vault.write_note(fpath, "\n".join(lines))
         exported_files.append(str(fpath))
 
     return {
@@ -2012,7 +1601,7 @@ def _course_folder_name(course_id: int, instance: str) -> str:
     courses = courses_resp.get("courses", []) if isinstance(courses_resp, dict) else courses_resp
     for c in courses if isinstance(courses, list) else []:
         if int(c.get("id", 0)) == int(course_id):
-            return _safe_filename(c.get("fullname") or c.get("shortname") or f"UC_{course_id}")
+            return vault.safe_filename(c.get("fullname") or c.get("shortname") or f"UC_{course_id}")
     return f"UC_{course_id}"
 
 
@@ -2022,7 +1611,7 @@ def _sync_root(vault_dir: str = "") -> Path:
     Por ordem: o `vault_dir` da chamada, a opção `sync_subdir`
     (`MOODLE_MCP_SYNC_SUBDIR`) e a raiz do Vault. Sempre confinada ao Vault.
     """
-    return _resolve_in_vault(vault_dir or config.get("sync_subdir") or ".")
+    return vault.resolve_in_vault(vault_dir or config.get("sync_subdir") or ".")
 
 
 def _dashboard_name(instance: str) -> str:
@@ -2031,7 +1620,7 @@ def _dashboard_name(instance: str) -> str:
     Com um único nome, sincronizar a segunda instância apagava o painel da
     primeira.
     """
-    base = _safe_filename(config.get("dashboard_name") or "Painel Moodle")
+    base = vault.safe_filename(config.get("dashboard_name") or "Painel Moodle")
     return f"{base} ({instance})" if len(config.instances()) > 1 else base
 
 
@@ -2146,13 +1735,13 @@ def _sync_course(
     course_assigns = assign_by_course.get(cid, [])
     uc_note_name = f"{safe_name}.md"
     dashboard_lines.append(
-        f"| `{cid}` | **{_cell(cname)}** | {prog_str} | **{course_total}** | {len(course_assigns)} | [[{link_root}Unidades Curriculares/{safe_name}\\|Abrir UC]] |"
+        f"| `{cid}` | **{vault.table_cell(cname)}** | {prog_str} | **{course_total}** | {len(course_assigns)} | [[{link_root}Unidades Curriculares/{safe_name}\\|Abrir UC]] |"
     )
 
     uc_lines = [
         "---",
         f"course_id: {cid}",
-        f"title: {_yaml(cname)}",
+        f"title: {vault.yaml_scalar(cname)}",
         f'progress: "{prog_str}"',
         f"updated: {now_str}",
         f"tags: [moodle, uc, {instance}]",
@@ -2173,8 +1762,10 @@ def _sync_course(
         gval = gi.get("gradeformatted") or "—"
         gmin = gi.get("grademin", "")
         gmax = gi.get("grademax", "")
-        fb = _html_to_markdown(gi.get("feedback", ""))
-        uc_lines.append(f"| {_cell(iname)} | **{_cell(gval)}** | {gmin}–{gmax} | {_cell(fb)} |")
+        fb = vault.html_to_markdown(gi.get("feedback", ""))
+        uc_lines.append(
+            f"| {vault.table_cell(iname)} | **{vault.table_cell(gval)}** | {gmin}–{gmax} | {vault.table_cell(fb)} |"
+        )
 
     uc_lines.extend(
         [
@@ -2192,7 +1783,7 @@ def _sync_course(
             aname = a.get("name", f"Trabalho {aid}")
             duedate = a.get("duedate", 0)
             due_str = datetime.fromtimestamp(duedate).strftime("%Y-%m-%d %H:%M") if duedate else "Sem prazo"
-            intro = _html_to_markdown(a.get("intro", ""))
+            intro = vault.html_to_markdown(a.get("intro", ""))
 
             # Check student's submission status
             sub_status = "—"
@@ -2240,7 +1831,7 @@ def _sync_course(
             n_disc, n_mine = _count_my_forum_posts(int(f["id"]), userid, instance=instance)
             fstatus = f"{n_mine} post(s) meus" if n_mine else "sem participação"
             uc_lines.append(
-                f"| `{fdue_str}` | [{_cell(f.get('name'))}]({base_url}/mod/forum/view.php?id={f.get('cmid')}) "
+                f"| `{fdue_str}` | [{vault.table_cell(f.get('name'))}]({base_url}/mod/forum/view.php?id={f.get('cmid')}) "
                 f"| {n_disc} | {n_mine} | `{f.get('cmid')}` |"
             )
             upcoming_items.append(
@@ -2303,7 +1894,7 @@ def _sync_course(
         for section in contents:
             sec_name = section.get("name") or f"Secção {section.get('section', '')}"
             uc_lines.append(f"### {sec_name}")
-            sec_summary = _html_to_markdown(section.get("summary", ""))
+            sec_summary = vault.html_to_markdown(section.get("summary", ""))
             if sec_summary:
                 uc_lines.append(sec_summary)
             for mod in section.get("modules", []):
@@ -2321,7 +1912,7 @@ def _sync_course(
             uc_lines.append("")
 
     uc_file = uc_dir / uc_note_name
-    _write_note(uc_file, "\n".join(uc_lines))
+    vault.write_note(uc_file, "\n".join(uc_lines))
     created_files.append(str(uc_file))
 
     for wanted, extra, label in (
@@ -2446,14 +2037,14 @@ def sync_dashboard(
     used_notes: set[Path] = set()
     synced = 0
     dashboard = _dashboard_name(instance)
-    relative = target_dir.relative_to(_vault_root()).as_posix()
+    relative = target_dir.relative_to(vault.vault_root()).as_posix()
     link_root = "" if relative == "." else f"{relative}/"
     for position, course in enumerate(courses):
         cname = course.get("fullname") or course.get("shortname") or f"Curso {course.get('id')}"
         if on_progress:
             on_progress(position, len(courses), cname)
         # UCs com o mesmo nome escreviam a mesma nota; o painel liga ao nome único.
-        note_name = _unique_path(Path(_safe_filename(cname) + ".md"), used_notes).stem
+        note_name = vault.unique_path(Path(vault.safe_filename(cname) + ".md"), used_notes).stem
         try:
             rows, upcoming, choices, files = _sync_course(
                 course,
@@ -2500,7 +2091,7 @@ def sync_dashboard(
         # Só sinaliza o que continua em falta: um prazo passado já entregue não é um alerta.
         flag = " ⚠️" if due_ts < now_ts and status in pending_states else ""
         dashboard_lines.append(
-            f"| `{due_str}`{flag} | {kind} | {_cell(cname)} | **{_cell(aname)}** | `{status}` | `{ref_id}` |"
+            f"| `{due_str}`{flag} | {kind} | {vault.table_cell(cname)} | **{vault.table_cell(aname)}** | `{status}` | `{ref_id}` |"
         )
 
     if pending_choices:
@@ -2519,7 +2110,7 @@ def sync_dashboard(
     if on_progress:
         on_progress(len(courses), len(courses), "painel")
     dashboard_file = target_dir / f"{dashboard}.md"
-    _write_note(dashboard_file, "\n".join(dashboard_lines) + "\n")
+    vault.write_note(dashboard_file, "\n".join(dashboard_lines) + "\n")
     created_files.insert(0, str(dashboard_file))
 
     return {
@@ -2849,7 +2440,7 @@ def main(argv: list[str] | None = None) -> int:
         if risky in enabled:
             logger.warning("Toolset '%s' ativo: as suas ferramentas %s.", risky, nota)
     if enabled & {"write", "raw"}:
-        mode = _confirm_mode()
+        mode = confirm.confirm_mode()
         if mode == "client":
             logger.warning(
                 "MOODLE_MCP_CONFIRM_WRITES=client: as ações no Moodle não pedem confirmação ao "

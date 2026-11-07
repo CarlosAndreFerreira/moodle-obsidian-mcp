@@ -13,7 +13,7 @@ import pytest
 import responses
 from conftest import BASE, TOKEN
 
-from moodle_mcp import config, server
+from moodle_mcp import config, server, transport
 
 FILE = f"{BASE}/webservice/pluginfile.php/12/mod_resource/content/0/aula.pdf"
 REST = f"{BASE}/webservice/rest/server.php"
@@ -39,7 +39,7 @@ def _query(url: str) -> dict[str, list[str]]:
     ],
 )
 def test_accepts_files_of_the_instance(url):
-    assert server._validate_file_url(url, BASE)
+    assert transport.validate_file_url(url, BASE)
 
 
 @pytest.mark.parametrize(
@@ -63,14 +63,14 @@ def test_accepts_files_of_the_instance(url):
 )
 def test_refuses_anything_else(url):
     with pytest.raises(ValueError, match="Recusado"):
-        server._validate_file_url(url, BASE)
+        transport.validate_file_url(url, BASE)
 
 
 def test_respects_base_path():
     base = "https://escola.example/moodle"
-    assert server._validate_file_url(f"{base}/webservice/pluginfile.php/1/a.pdf", base)
+    assert transport.validate_file_url(f"{base}/webservice/pluginfile.php/1/a.pdf", base)
     with pytest.raises(ValueError):
-        server._validate_file_url("https://escola.example/webservice/pluginfile.php/1/a.pdf", base)
+        transport.validate_file_url("https://escola.example/webservice/pluginfile.php/1/a.pdf", base)
 
 
 @responses.activate

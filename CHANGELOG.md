@@ -1,0 +1,84 @@
+# Changelog
+
+Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-PT/1.1.0/);
+o projeto segue [versionamento semântico](https://semver.org/lang/pt/) (antes da
+1.0, uma versão menor pode mudar comportamento).
+
+## [0.6.0] — 2026-11-07
+
+### Adicionado
+- Registo de auditoria (`audit.log`, 0600) de cada ação no Moodle, com a decisão:
+  confirmada, recusada ou executada sem confirmação.
+- `SECURITY.md` com o canal privado para reportar vulnerabilidades.
+- Workflow de release para o PyPI com *trusted publishing* e atestações.
+- Testes de propriedades (Hypothesis) para nomes de ficheiro, validação de URLs
+  e limpeza de conteúdo; `mypy` em modo estrito nos módulos de base.
+
+### Alterado
+- O pacote passa a chamar-se `moodle-obsidian-mcp` (o nome `moodle-mcp` está
+  ocupado no PyPI). Os comandos, o módulo Python e a configuração não mudam.
+- `server.py` dividido: `transport.py` (HTTP), `vault.py` (ficheiros e notas) e
+  `confirm.py` (confirmação humana).
+- `get_course_participants` devolve só id, nome, papéis e grupos (sem emails nem
+  dados de perfil dos colegas).
+
+### Segurança
+- O sdist passa a ter uma lista explícita de ficheiros: um `uv build` local já
+  não inclui notas locais nem caches.
+
+## [0.5.0] — 2026-11-07
+
+### Adicionado
+- `moodle-mcp --login`: login pelo navegador com *passport* aleatório e de uso
+  único; o handler só aceita a resposta assinada `md5(wwwroot . passport)`.
+- `MOODLE_MCP_SYNC_SUBDIR` e `MOODLE_MCP_DASHBOARD_NAME`; um painel por instância.
+- Progresso por UC durante a sincronização.
+
+### Alterado
+- Sincronização, download de materiais e exportação de fóruns correm numa thread
+  (antes bloqueavam o servidor).
+- Sessões HTTP partilhadas, `User-Agent` próprio e novas tentativas para leituras.
+- macOS: o handler é um applet AppleScript que recebe o URL por Apple Event.
+
+### Removido
+- O link fixo `passport=12345`.
+
+### Segurança
+- Fecha a troca do token por qualquer página web (CSRF de login) e a gravação do
+  token na instância errada.
+
+## [0.4.0] — 2026-11-07
+
+### Adicionado
+- CI: ruff, mypy, pytest (Linux, Windows, macOS; Python 3.11–3.13) e `pip-audit`.
+- `MOODLE_MCP_MAX_DOWNLOAD_MB` e avisos de ficheiros de segredos legíveis.
+
+### Alterado
+- Erros do Moodle chegam como erros (`isError`), com a causa e o passo seguinte.
+- A sincronização isola cada UC e reporta `status: "parcial"` e `errors`.
+- Nomes de ficheiro únicos e válidos em todos os sistemas; páginas com o nome do módulo.
+
+### Corrigido
+- O token do login tem precedência sobre um token antigo no `.env` legado.
+- Escrita atómica, com 0600, de credenciais e registos; downloads atómicos.
+
+## [0.3.0] — 2026-11-07
+
+### Adicionado
+- Confirmação humana, pedida pelo servidor (elicitation), de cada ação no Moodle.
+- Limpeza de conteúdo escondido e caracteres invisíveis nas respostas do Moodle.
+- Desativação de conteúdo ativo do Obsidian (Dataview, Templater, imagens remotas).
+
+## [0.2.1] — 2026-11-07
+
+### Segurança
+- O token só é enviado para ficheiros da instância configurada.
+- O token deixa de aparecer no texto das exceções.
+- `set_moodle_token` valida antes de gravar e não muda o URL de uma instância.
+- As ferramentas que gravam credenciais (`auth`) ficam desligadas por omissão.
+
+[0.6.0]: https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp/compare/v0.5.0...v0.6.0
+[0.5.0]: https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp/compare/v0.4.0...v0.5.0
+[0.4.0]: https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp/compare/v0.2.1...v0.3.0
+[0.2.1]: https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp/compare/v0.2.0...v0.2.1

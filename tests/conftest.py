@@ -37,11 +37,11 @@ config.legacy_env_file = lambda: _TMP / "inexistente.env"  # type: ignore[assign
 @pytest.fixture
 def vault(tmp_path, monkeypatch):
     """Vault vazio e exclusivo de cada teste."""
-    from moodle_mcp import server
+    from moodle_mcp import vault as vaultlib
 
     root = tmp_path / "vault"
     root.mkdir()
-    monkeypatch.setattr(server, "OBSIDIAN_VAULT_DIR", str(root))
+    monkeypatch.setattr(vaultlib, "OBSIDIAN_VAULT_DIR", str(root))
     return root
 
 

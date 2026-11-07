@@ -25,6 +25,8 @@ dist/
 build/
 .ruff_cache/
 .pytest_cache/
+.hypothesis/
+.mypy_cache/
 
 # IDE & OS
 .vscode/

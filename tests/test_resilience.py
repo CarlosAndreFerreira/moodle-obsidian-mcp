@@ -14,7 +14,8 @@ import pytest
 import responses
 from conftest import BASE
 
-from moodle_mcp import config, handler, login, server, token_catcher
+from moodle_mcp import config, handler, login, server, token_catcher, transport
+from moodle_mcp import vault as vaultlib
 
 REST = f"{BASE}/webservice/rest/server.php"
 
@@ -26,10 +27,10 @@ REST = f"{BASE}/webservice/rest/server.php"
 
 @pytest.fixture
 def fast_retries(monkeypatch):
-    monkeypatch.setattr(server, "_BACKOFF", 0)
-    server._session.cache_clear()
+    monkeypatch.setattr(transport, "BACKOFF", 0)
+    transport.session.cache_clear()
     yield
-    server._session.cache_clear()
+    transport.session.cache_clear()
 
 
 @responses.activate
@@ -72,15 +73,15 @@ def test_html_instead_of_json_is_explained(fast_retries):
 
 def test_yaml_values_survive_quotes_and_newlines():
     value = 'Ética: "A" #1\nlinha'
-    assert json.loads(server._yaml(value)) == value
+    assert json.loads(vaultlib.yaml_scalar(value)) == value
 
 
 def test_table_cells_escape_pipes_and_newlines():
-    assert server._cell("a|b\n  c") == "a\\|b c"
+    assert vaultlib.table_cell("a|b\n  c") == "a\\|b c"
 
 
 def test_filenames_do_not_break_obsidian_links():
-    assert server._safe_filename("UC [2026] #1 ^x") == "UC -2026- -1 -x"
+    assert vaultlib.safe_filename("UC [2026] #1 ^x") == "UC -2026- -1 -x"
 
 
 def test_toolset_removal_fails_closed(monkeypatch):

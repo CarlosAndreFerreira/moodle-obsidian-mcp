@@ -3,8 +3,8 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "moodle-mcp"
-version = "0.5.0"
+name = "moodle-obsidian-mcp"
+version = "0.6.0"
 description = "Servidor MCP para Moodle (UAb/UTAD) com sincronização para o Obsidian"
 readme = "README.md"
 # tomllib é stdlib a partir do 3.11 e é o que lê o config.toml sem dependências.
@@ -29,7 +29,7 @@ dependencies = [
 # O PyMuPDF é AGPL-3.0 e é viral: fica como extra para que instalar o servidor
 # não imponha a licença a quem não precise da extração de texto de PDFs.
 pdf = ["pymupdf>=1.24.0"]
-dev = ["pytest>=8.0", "responses>=0.25", "ruff>=0.6", "mypy>=1.11"]
+dev = ["pytest>=8.0", "responses>=0.25", "ruff>=0.6", "mypy>=1.11", "hypothesis>=6.100"]
 
 [project.scripts]
 moodle-mcp = "moodle_mcp.server:main"
@@ -40,6 +40,22 @@ Homepage = "https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp"
 
 [tool.hatch.build.targets.wheel]
 packages = ["moodle_mcp"]
+
+# Lista explícita do que entra no sdist. O hatchling segue o .gitignore mas não
+# o .git/info/exclude, e sem esta lista um `uv build` local publicava notas
+# locais (p.ex. relatórios de segurança por divulgar) e caches de testes.
+[tool.hatch.build.targets.sdist]
+include = [
+  "moodle_mcp",
+  "tests",
+  "README.md",
+  "CHANGELOG.md",
+  "SECURITY.md",
+  "LICENSE",
+  ".env.example",
+  "main.py",
+  "capture_mobile_token.py",
+]
 
 [tool.ruff]
 line-length = 110
@@ -59,3 +75,24 @@ ignore = ["D203", "D213"]
 [tool.mypy]
 python_version = "3.11"
 warn_unused_ignores = true
+
+# Os módulos sem dependência do servidor são verificados em modo estrito; o
+# server.py (ferramentas MCP que devolvem o JSON do Moodle) fica no modo normal.
+[[tool.mypy.overrides]]
+module = [
+  "moodle_mcp.config",
+  "moodle_mcp.confirm",
+  "moodle_mcp.login",
+  "moodle_mcp.sanitize",
+  "moodle_mcp.transport",
+  "moodle_mcp.vault",
+]
+# Equivalente ao `strict` (que o mypy só aceita globalmente), por módulo.
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+disallow_untyped_calls = true
+disallow_any_generics = true
+check_untyped_defs = true
+warn_return_any = true
+no_implicit_reexport = true
+strict_equality = true

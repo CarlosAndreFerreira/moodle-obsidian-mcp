@@ -47,6 +47,14 @@ cd moodle-obsidian-mcp
 uv pip install -e ".[pdf]"
 ```
 
+The `moodlemobile://` handler needs a permanent install (`uvx` runs from a cache that can be wiped):
+
+```bash
+uv tool install "moodle-obsidian-mcp[pdf] @ git+https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp"
+```
+
+The distribution is named `moodle-obsidian-mcp` (`moodle-mcp` is taken on PyPI); the commands are still `moodle-mcp` and `moodle-mcp-token-catcher`.
+
 The `[pdf]` extra adds PDF text extraction via PyMuPDF. It's kept out of the base install because PyMuPDF is **AGPL-3.0**; without it everything works, PDF downloads just don't get the companion `.md`.
 
 Register the `moodlemobile://` handler (needed for SSO login):
@@ -65,6 +73,8 @@ moodle-mcp --uninstall-handler
 - **The server doesn't block:** sync, material download and forum export run in a thread and report per-course progress to the client.
 - **Vault layout:** `MOODLE_MCP_SYNC_SUBDIR` puts the dashboard and course notes in a subfolder (links follow); `MOODLE_MCP_DASHBOARD_NAME` renames the dashboard. With several instances, each gets its own dashboard.
 - **Atomic, bounded downloads:** a failed download leaves the previous file intact, and no file exceeds `MOODLE_MCP_MAX_DOWNLOAD_MB` (500).
+- **Audit trail:** every action on Moodle is recorded in `audit.log` (`0600`, in the config directory) with its outcome — confirmed, refused, or run without confirmation — with no tokens and rotation at 1 MB.
+- **Less personal data:** `get_course_participants` returns only id, name, roles and groups; classmates' emails and profile data never reach the LLM provider.
 - **Secrets:** `credentials.json` and `last_auth.log` are written atomically and already `0600`; an unreadable `credentials.json` is set aside rather than deleted; `moodle-mcp --show-config` (and startup) warn about files readable by other users.
 
 ## Configuration
@@ -177,7 +187,13 @@ mypy moodle_mcp
 pytest
 ```
 
-The test suite covers token safety (credential confinement, cross-host refusal), prompt-injection sanitisation, resilience and robustness. CI runs lint, mypy and tests on Linux, Windows and macOS (Python 3.11–3.13), plus `pip-audit`.
+The test suite covers token safety (credential confinement, cross-host refusal), prompt-injection sanitisation, resilience and robustness, plus Hypothesis property tests for file names, URL validation and content sanitisation. The base modules (`config`, `confirm`, `login`, `sanitize`, `transport`, `vault`) are type-checked with strict mypy flags. CI runs lint, mypy, `uv lock --check` and tests on Linux, Windows and macOS (Python 3.11–3.13), plus `pip-audit`.
+
+Releases are published to PyPI from a `vX.Y.Z` tag via trusted publishing (no stored token) with provenance attestations; see [CHANGELOG.md](CHANGELOG.md).
+
+## Security
+
+Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md) — never in public issues or group chats.
 
 ## License
 
