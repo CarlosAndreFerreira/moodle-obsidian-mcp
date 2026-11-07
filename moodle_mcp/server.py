@@ -19,6 +19,7 @@ Arranque: `moodle-mcp` (ver `main`), `python -m moodle_mcp.server`, ou o shim
 import argparse
 import base64
 import binascii
+import functools
 import hashlib
 import html
 import json
@@ -26,11 +27,15 @@ import logging
 import os
 import re
 import sys
+import webbrowser
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, cast
 from urllib.parse import unquote, urlparse
 
+import anyio
+import anyio.from_thread
+import anyio.to_thread
 import requests
 from bs4 import BeautifulSoup
 from markdownify import markdownify as md_convert
@@ -38,14 +43,14 @@ from mcp import types as mcp_types
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field
-from urllib3.util import parse_url
+from urllib3.util import Retry, parse_url
 
-from moodle_mcp import __version__, config, handler, sanitize
+from moodle_mcp import __version__, config, handler, login, sanitize
 
 try:  # O PyMuPDF é AGPL-3.0 e fica no extra `[pdf]`; sem ele tudo o resto funciona.
     import pymupdf as fitz
 except ImportError:  # pragma: no cover
-    fitz = None
+    fitz = None  # type: ignore[assignment]
 
 mcp = FastMCP("Moodle & Obsidian MCP Server")
 
@@ -177,11 +182,20 @@ def _instance_field() -> Any:
             f"Instância Moodle a usar. Configuradas nesta instalação: {listed}. "
             f"Omissão: '{DEFAULT_INSTANCE}'."
         ),
-        json_schema_extra={"enum": names} if len(names) > 1 else None,
+        json_schema_extra=cast(Any, {"enum": names}) if len(names) > 1 else None,
     )
 
 
 Inst = Annotated[str, _instance_field()]
+VaultDir = Annotated[
+    str,
+    Field(
+        description=(
+            "Subpasta do Vault onde ficam o painel e 'Unidades Curriculares'; "
+            "vazio usa a configuração (MOODLE_MCP_SYNC_SUBDIR) ou a raiz do Vault."
+        )
+    ),
+]
 CourseId = Annotated[
     int,
     Field(description="ID numérico da disciplina/UC (campo `id` de get_enrolled_courses)."),
@@ -252,13 +266,61 @@ class MoodleRequestError(RuntimeError):
     """
 
 
-def _request(method: str, url: str, **kwargs: Any) -> requests.Response:
+#: Base do backoff exponencial entre tentativas, em segundos.
+_BACKOFF = 0.5
+
+USER_AGENT = f"moodle-mcp/{__version__} (+https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp)"
+
+
+@functools.cache
+def _session(retry: bool) -> requests.Session:
+    """Sessão HTTP partilhada (keep-alive), com ou sem novas tentativas.
+
+    Uma sincronização faz centenas de pedidos ao mesmo servidor: reutilizar a
+    ligação TLS poupa um handshake por pedido, e uma falha transitória (502 de
+    um proxy, 503 de manutenção curta, 429 por excesso de pedidos) deixa de
+    deitar abaixo a sincronização inteira.
+
+    Só pedidos idempotentes repetem depois de o servidor os ter recebido. Uma
+    escrita (enviar mensagem, publicar no fórum) só repete se a ligação nem
+    chegou a ser estabelecida: repetir depois de um 502 podia publicar duas vezes.
+
+    Args:
+        retry: True para leituras; False para escritas.
+
+    Returns:
+        A sessão configurada.
+    """
+    if retry:
+        policy = Retry(
+            total=4,
+            connect=3,
+            read=2,
+            status=3,
+            backoff_factor=_BACKOFF,
+            status_forcelist=(429, 500, 502, 503, 504),
+            allowed_methods=frozenset({"GET", "POST"}),
+            respect_retry_after_header=True,
+            raise_on_status=False,
+        )
+    else:
+        policy = Retry(total=2, connect=2, read=0, status=0, other=0, backoff_factor=_BACKOFF)
+    session = requests.Session()
+    adapter = requests.adapters.HTTPAdapter(max_retries=policy)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    session.headers["User-Agent"] = USER_AGENT
+    return session
+
+
+def _request(method: str, url: str, *, retry: bool = True, **kwargs: Any) -> requests.Response:
     """Faz um pedido HTTP e converte qualquer falha numa exceção sem segredos.
 
     Args:
         method: Método HTTP.
         url: URL sem segredos na query (os segredos vão em `params`/`data`).
-        **kwargs: Passados a `requests.request`.
+        retry: Se repete em falhas transitórias (só para pedidos idempotentes).
+        **kwargs: Passados a `Session.request`.
 
     Returns:
         A resposta, já com `raise_for_status()` verificado.
@@ -267,7 +329,7 @@ def _request(method: str, url: str, **kwargs: Any) -> requests.Response:
         MoodleRequestError: Em qualquer falha de rede ou código HTTP de erro.
     """
     try:
-        response = requests.request(method, url, **kwargs)
+        response = _session(retry).request(method, url, **kwargs)
         response.raise_for_status()
     except requests.RequestException as exc:
         status = getattr(getattr(exc, "response", None), "status_code", None)
@@ -275,6 +337,17 @@ def _request(method: str, url: str, **kwargs: Any) -> requests.Response:
         # `from None`: a exceção original tem o URL com o token no texto.
         raise MoodleRequestError(f"{method.upper()} {urlparse(url).path} falhou: {detail}") from None
     return response
+
+
+def _json(response: requests.Response) -> Any:
+    """Lê o JSON de uma resposta, com uma mensagem útil quando o Moodle devolve HTML."""
+    try:
+        return response.json()
+    except ValueError:
+        raise MoodleRequestError(
+            f"{urlparse(response.url).path}: a resposta não é JSON (HTTP {response.status_code}). "
+            "O Moodle pode estar em manutenção ou a pedir login no navegador."
+        ) from None
 
 
 #: Caminhos de ficheiro do Moodle aos quais o token pode ser acrescentado.
@@ -524,15 +597,17 @@ def _ws_call(
         payload.update(params)
 
     url = f"{base_url}/webservice/rest/server.php"
+    # Só leituras repetem: uma escrita repetida depois de um 502 podia duplicar.
+    retry = wsfunction in _TRUSTED_WSFUNCTIONS or bool(_READ_ONLY_WSFUNCTION.search(wsfunction))
     if method.upper() == "GET":
-        response = _request("GET", url, params=payload, timeout=30)
+        response = _request("GET", url, params=payload, timeout=30, retry=retry)
     else:
-        response = _request("POST", url, data=payload, timeout=30)
+        response = _request("POST", url, data=payload, timeout=30, retry=retry)
     if wsfunction not in _TRUSTED_WSFUNCTIONS:
         _mark_untrusted_content_seen()
     # Redação de segredos e limpeza de conteúdo escondido no único ponto por
     # onde passam todas as respostas da API.
-    return sanitize.clean_payload(_redact_secrets(response.json()))
+    return sanitize.clean_payload(_redact_secrets(_json(response)))
 
 
 def _moodle_call(
@@ -541,27 +616,112 @@ def _moodle_call(
     method: str = "POST",
     instance: str = DEFAULT_INSTANCE,
 ) -> Any:
-    """Chama uma função REST do Moodle na instância indicada."""
+    """Chama uma função REST do Moodle na instância indicada.
+
+    Raises:
+        MoodleAPIError: Se não houver token ou se o Moodle responder com uma
+            exceção. O Moodle devolve os erros com HTTP 200 e um corpo
+            `{"exception": ...}`; devolvê-los como dados faria o modelo tratá-los
+            como resultado (e, por vezes, inventar um). Como exceção, chegam ao
+            cliente como `isError`, que é o que a spec MCP recomenda.
+        MoodleRequestError: Se o pedido HTTP falhar.
+    """
     base_url, token = _resolve_target(instance)
     if not token:
-        return {
-            "error": True,
-            "instance": instance,
-            "message": (
-                f"Token para '{instance}' não está configurado. "
-                f"Acede a {base_url}/user/managetoken.php (em Preferências -> Chaves de segurança) "
-                "ou usa `set_moodle_token`. Para ver onde a configuração é lida: "
-                "`moodle-mcp --show-config`."
-            ),
-        }
-    return _ws_call(base_url, token, wsfunction, params, method)
+        raise MoodleAPIError(
+            "notoken",
+            f"A instância '{instance}' não tem token configurado. {_login_hint(base_url)}",
+        )
+    result = _ws_call(base_url, token, wsfunction, params, method)
+    if isinstance(result, dict) and "exception" in result:
+        raise _api_error(result, wsfunction, instance, base_url)
+    return result
+
+
+class MoodleAPIError(RuntimeError):
+    """O Moodle recusou o pedido (resposta `{"exception": ...}` ou falta de token).
+
+    Attributes:
+        errorcode: O `errorcode` do Moodle, p.ex. `invalidtoken`.
+    """
+
+    def __init__(self, errorcode: str, message: str) -> None:
+        """Guarda o `errorcode` ao lado da mensagem acionável."""
+        super().__init__(message)
+        self.errorcode = errorcode
+
+
+#: Erros que nenhuma outra chamada vai resolver: a sincronização pára logo.
+_FATAL_ERRORCODES = frozenset({"notoken", "invalidtoken", "servicerequireslogin", "usernotfullysetup"})
+
+
+def _login_hint(base_url: str) -> str:
+    return (
+        "Faz login de novo: com o handler instalado (`moodle-mcp --install-handler`), corre "
+        "`moodle-mcp --login` e confirma no navegador."
+    )
+
+
+def _api_error(result: dict[str, Any], wsfunction: str, instance: str, base_url: str) -> MoodleAPIError:
+    """Converte uma resposta de erro do Moodle numa mensagem acionável."""
+    code = str(result.get("errorcode") or result.get("exception") or "desconhecido")
+    detail = str(result.get("message") or "")
+    if code == "invalidtoken":
+        message = (
+            f"O Moodle recusou o token de '{instance}' (expirou ou foi revogado). {_login_hint(base_url)}"
+        )
+    elif code in {"accessexception", "webservicefunctionnotavailable", "nopermissions", "requireloginerror"}:
+        message = (
+            f"A função `{wsfunction}` não está disponível para a tua conta em '{instance}' "
+            f"({code}: {detail}). O administrador do Moodle não a ativou no serviço da app móvel."
+        )
+    else:
+        message = f"O Moodle devolveu um erro em `{wsfunction}` ({code}): {detail}"
+    return MoodleAPIError(code, message)
+
+
+def _soft(
+    call: Any,
+    *args: Any,
+    default: Any = None,
+    errors: list[dict[str, str]] | None = None,
+    what: str = "",
+    **kwargs: Any,
+) -> Any:
+    """Corre uma chamada opcional; um erro dela não deve parar o resto.
+
+    Erros fatais (token inválido ou em falta) voltam a ser levantados: repetir
+    em cada disciplina só encheria o relatório com o mesmo problema.
+
+    Args:
+        call: Função a chamar com `*args` e `**kwargs`.
+        *args: Argumentos posicionais de `call`.
+        default: O valor a devolver se a chamada falhar.
+        errors: Lista onde registar o erro, se dada.
+        what: Descrição curta do que falhou, para o relatório.
+        **kwargs: Argumentos nomeados de `call`.
+
+    Returns:
+        O resultado da chamada, ou `default`.
+    """
+    try:
+        return call(*args, **kwargs)
+    except MoodleAPIError as exc:
+        if exc.errorcode in _FATAL_ERRORCODES:
+            raise
+        if errors is not None:
+            errors.append({"item": what, "error": str(exc)})
+    except (MoodleRequestError, ValueError) as exc:
+        if errors is not None:
+            errors.append({"item": what, "error": str(exc)})
+    return default
 
 
 def _get_current_user_id(instance: str = DEFAULT_INSTANCE) -> int:
     info = _moodle_call("core_webservice_get_site_info", instance=instance)
     if isinstance(info, dict) and "userid" in info:
         return int(info["userid"])
-    raise ValueError(f"Não foi possível obter userid da sessão Moodle ({instance}): {info}")
+    raise MoodleAPIError("nouserid", f"O Moodle não devolveu o userid da sessão ({instance}).")
 
 
 def _html_to_markdown(html_text: str) -> str:
@@ -578,6 +738,21 @@ def _html_to_markdown(html_text: str) -> str:
         return html.unescape(clean).strip()
 
 
+def _yaml(value: Any) -> str:
+    """Valor escalar seguro para frontmatter YAML.
+
+    Uma string JSON é YAML válido: aspas, `:`, `#` e quebras de linha num nome
+    de UC ou de fórum deixam de partir o frontmatter (e as propriedades do
+    Obsidian e as consultas Dataview que dele dependem).
+    """
+    return json.dumps(str(value), ensure_ascii=False)
+
+
+def _cell(value: Any) -> str:
+    """Texto seguro para uma célula de tabela Markdown (sem `|` nem quebras de linha)."""
+    return re.sub(r"\s*\n\s*", " ", str(value)).replace("|", "\\|")
+
+
 def _write_note(path: Path, markdown: str) -> None:
     """Escreve uma nota no Vault com o conteúdo ativo do Obsidian desativado.
 
@@ -586,12 +761,54 @@ def _write_note(path: Path, markdown: str) -> None:
     imagem remota num post não pode executar código nem chamar um servidor
     quando o estudante abre a nota.
     """
-    path.write_text(sanitize.neutralize_markdown(markdown), encoding="utf-8")
+    config.atomic_write(path, sanitize.neutralize_markdown(markdown), 0o644)
+
+
+_WINDOWS_RESERVED = frozenset(
+    {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
+)
+_MAX_NAME = 120
 
 
 def _safe_filename(name: str) -> str:
-    cleaned = re.sub(r'[\\/*?:"<>|\r\n]+', "-", name).strip()
-    return re.sub(r"\s+", " ", cleaned)[:120]
+    """Converte um nome vindo do Moodle num nome de ficheiro válido em todos os sistemas.
+
+    * Retira separadores, caracteres proibidos no Windows e de controlo.
+    * Recusa `.`/`..`/vazio, que mudariam de diretório ou não teriam nome.
+    * Retira pontos e espaços finais (o Windows descarta-os em silêncio).
+    * Prefixa nomes reservados do Windows (`CON`, `NUL`, `COM1`…), com ou sem extensão.
+    * Trunca o nome, não a extensão: `aula.pdf` com 200 caracteres continua a
+      acabar em `.pdf` e a ter o texto extraído.
+    """
+    # `#^[]` são válidos em ficheiros mas partem as ligações [[...]] do Obsidian.
+    cleaned = re.sub(r'[\\/*?:"<>|#^\[\]\x00-\x1f\x7f]+', "-", str(name))
+    cleaned = re.sub(r"\s+", " ", cleaned).strip().rstrip(". ")
+    if not cleaned.strip("."):
+        return "_"
+    stem, dot, suffix = cleaned.rpartition(".")
+    if not dot or not stem or len(suffix) > 10 or " " in suffix:
+        stem, suffix = cleaned, ""
+    if len(cleaned) > _MAX_NAME:
+        keep = _MAX_NAME - (len(suffix) + 1 if suffix else 0)
+        stem = stem[:keep].rstrip(". ")
+        cleaned = f"{stem}.{suffix}" if suffix else stem
+    if (stem if suffix else cleaned).split(".")[0].upper() in _WINDOWS_RESERVED:
+        cleaned = f"_{cleaned}"
+    return cleaned
+
+
+def _unique_path(path: Path, used: set[Path]) -> Path:
+    """Devolve um caminho ainda não usado nesta execução, com ` (2)`, ` (3)`… se preciso.
+
+    Dois módulos com o mesmo nome (ou todas as páginas `index.html` de uma
+    secção) escreviam no mesmo ficheiro e só o último sobrevivia.
+    """
+    candidate, counter = path, 2
+    while candidate in used:
+        candidate = path.with_name(f"{path.stem} ({counter}){path.suffix}")
+        counter += 1
+    used.add(candidate)
+    return candidate
 
 
 # ==============================================================================
@@ -739,10 +956,12 @@ def decode_mobile_launch_token(
     ],
     instance: Inst = DEFAULT_INSTANCE,
 ) -> dict[str, Any]:
-    """Descodifica um URL `moodlemobile://token=...` e guarda o `wstoken` no `.env`.
+    """Verifica um URL `moodlemobile://token=...` e guarda o `wstoken`.
 
-    O URL é obtido em
-    `/admin/tool/mobile/launch.php?service=moodle_mobile_app&passport=12345`.
+    Só aceita a resposta a um login iniciado com `moodle-mcp --login`: o
+    primeiro campo do payload é `md5(wwwroot . passport)`, e o passport é
+    aleatório e de uso único. Sem isso, qualquer página web podia enviar um
+    token de outra conta. A instância é a do login pendente.
 
     A resposta nunca inclui o payload descodificado nem o token: ambos iriam para
     o provider de LLM configurado no cliente e ficariam no histórico da sessão.
@@ -751,7 +970,8 @@ def decode_mobile_launch_token(
     Args:
         launch_url_or_base64: O URL `moodlemobile://token=...` completo ou só a
             parte em Base64.
-        instance: Nome da instância a configurar; vazio usa a predefinida.
+        instance: Ignorado; mantido por compatibilidade. A instância é a do
+            login pendente, confirmada pela assinatura.
 
     Returns:
         Dicionário com `saved`, `instance`, `token_fingerprint`, `has_privatetoken`
@@ -778,6 +998,11 @@ def decode_mobile_launch_token(
                 "mostrado por poder conter credenciais.)"
             ),
         }
+
+    try:
+        instance = login.verify(parts[0])
+    except login.LoginError as exc:
+        return {"error": True, "saved": False, "message": str(exc)}
 
     token = parts[1].strip()
     validation = set_moodle_token(token, instance=instance)
@@ -830,13 +1055,9 @@ def extract_token_from_session_cookie(
             token = candidates[0]
             return set_moodle_token(token, instance=instance)
 
-    # 2. Try /admin/tool/mobile/launch.php
-    launch_resp = session.get(
-        f"{base_url}/admin/tool/mobile/launch.php",
-        params={"service": "moodle_mobile_app", "passport": "12345"},
-        allow_redirects=False,
-        timeout=20,
-    )
+    # 2. Fluxo da app móvel, com um passport de uso único (verificado no decode)
+    pending = login.start_login(instance)
+    launch_resp = session.get(pending["url"], allow_redirects=False, timeout=20)
     loc = launch_resp.headers.get("Location", "")
     if "token=" in loc:
         return decode_mobile_launch_token(loc, instance=instance)
@@ -906,15 +1127,18 @@ def get_enrolled_courses(
     Lista todas as disciplinas/unidades curriculares em que o aluno está inscrito.
     `classification` pode ser: 'all', 'inprogress', 'future', 'past', 'favourites'.
     """
-    res = _moodle_call(
-        "core_course_get_enrolled_courses_by_timeline_classification",
-        {"classification": classification},
-        instance=instance,
-    )
-    if isinstance(res, dict) and "exception" in res:
+    try:
+        return _moodle_call(
+            "core_course_get_enrolled_courses_by_timeline_classification",
+            {"classification": classification},
+            instance=instance,
+        )
+    except MoodleAPIError as exc:
+        if exc.errorcode in _FATAL_ERRORCODES:
+            raise
+        # Moodles antigos não têm a função por linha temporal.
         userid = _get_current_user_id(instance=instance)
         return _moodle_call("core_enrol_get_users_courses", {"userid": userid}, instance=instance)
-    return res
 
 
 @mcp.tool(annotations=_ann("Ver conteúdos da disciplina", read_only=True))
@@ -1067,13 +1291,7 @@ def download_moodle_file(
         MoodleRequestError: Se o download falhar.
     """
     target = _resolve_in_vault(dest_path)
-
-    with _authed_get(file_url, instance, stream=True, timeout=60) as r:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        with target.open("wb") as f:
-            for chunk in r.iter_content(chunk_size=65536):
-                if chunk:
-                    f.write(chunk)
+    _download_to(target, file_url, instance)
 
     result: dict[str, Any] = {
         "downloaded_file": str(target),
@@ -1090,7 +1308,7 @@ def download_moodle_file(
             doc = fitz.open(str(target))
             md_pages = [
                 "---",
-                f'source_pdf: "{target.name}"',
+                f"source_pdf: {_yaml(target.name)}",
                 f"pages: {len(doc)}",
                 f"extracted_at: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
                 f"tags: [moodle, pdf-extraido, {instance}]",
@@ -1099,7 +1317,7 @@ def download_moodle_file(
                 f"# 📄 Texto Extraído: {target.stem}",
                 "",
             ]
-            for idx, page in enumerate(doc, start=1):
+            for idx, page in enumerate(cast(Any, doc), start=1):
                 text = sanitize.strip_invisible(page.get_text("text")).strip()
                 if text:
                     md_pages.append(f"## Página {idx}\n\n{text}\n")
@@ -1115,13 +1333,53 @@ def download_moodle_file(
     return result
 
 
+def _max_download_bytes() -> int:
+    try:
+        return int(float(config.get("max_download_mb")) * 1024 * 1024)
+    except ValueError:
+        return 500 * 1024 * 1024
+
+
+def _download_to(target: Path, file_url: str, instance: str) -> None:
+    """Descarrega para um temporário e só no fim substitui o destino.
+
+    Um download que falhe a meio (rede, timeout, limite de tamanho) deixa o
+    ficheiro anterior intacto, em vez de um PDF truncado por cima do bom. O
+    limite (`MOODLE_MCP_MAX_DOWNLOAD_MB`, 500 por omissão) impede que um
+    ficheiro enorme, ou um servidor que nunca pare de enviar, encha o disco.
+
+    Raises:
+        ValueError: Se o ficheiro exceder o limite de tamanho.
+        MoodleRequestError: Se o pedido falhar.
+    """
+    limit = _max_download_bytes()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(f".{target.name}.part")
+    try:
+        with _authed_get(file_url, instance, stream=True, timeout=60) as r:
+            declared = int(r.headers.get("Content-Length") or 0)
+            if declared > limit:
+                raise ValueError(f"Ficheiro com {declared} bytes excede o limite de {limit} bytes.")
+            written = 0
+            with tmp.open("wb") as f:
+                for chunk in r.iter_content(chunk_size=65536):
+                    written += len(chunk)
+                    if written > limit:
+                        raise ValueError(f"Ficheiro excede o limite de {limit} bytes.")
+                    f.write(chunk)
+        os.replace(tmp, target)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
 @mcp.tool(annotations=_ann("Descarregar materiais da UC"))
-def download_all_course_materials_to_obsidian(
+async def download_all_course_materials_to_obsidian(
     course_id: CourseId,
     extract_pdfs: Annotated[
         bool, Field(description="Se converte cada PDF descarregado num `.md` pesquisável no Obsidian.")
     ] = True,
     instance: Inst = DEFAULT_INSTANCE,
+    vault_dir: VaultDir = "",
 ) -> dict[str, Any]:
     """
     Descarrega TODOS os ficheiros (PDFs, enunciados de e-fólios, slides, textos de apoio e páginas HTML)
@@ -1129,25 +1387,25 @@ def download_all_course_materials_to_obsidian(
     (`<Vault>/Unidades Curriculares/<Nome da UC>/Materiais/`),
     convertendo também os PDFs e Páginas HTML em notas Markdown pesquisáveis!
     """
+    return await _in_thread(download_course_materials, course_id, extract_pdfs, instance, vault_dir)
+
+
+def download_course_materials(
+    course_id: int, extract_pdfs: bool = True, instance: str = DEFAULT_INSTANCE, vault_dir: str = ""
+) -> dict[str, Any]:
+    """Implementação de `download_all_course_materials_to_obsidian` (síncrona, corre numa thread)."""
     contents = get_course_contents(course_id, instance=instance)
     if not isinstance(contents, list):
         return {"error": True, "details": contents}
 
-    # Find course name
-    cname = f"UC_{course_id}"
-    courses_resp = get_enrolled_courses("all", instance=instance)
-    courses = courses_resp.get("courses", []) if isinstance(courses_resp, dict) else courses_resp
-    if isinstance(courses, list):
-        for c in courses:
-            if int(c.get("id", 0)) == int(course_id):
-                cname = _safe_filename(c.get("fullname") or c.get("shortname") or cname)
-                break
+    cname = _course_folder_name(course_id, instance)
 
-    base_uc_dir = _resolve_in_vault(Path("Unidades Curriculares") / cname / "Materiais")
+    base_uc_dir = _resolve_in_vault(_sync_root(vault_dir) / "Unidades Curriculares" / cname / "Materiais")
     base_uc_dir.mkdir(parents=True, exist_ok=True)
 
-    downloaded = []
-    errors = []
+    downloaded: list[str] = []
+    errors: list[dict[str, str]] = []
+    used: set[Path] = set()
 
     for section in contents:
         sec_name = _safe_filename(section.get("name") or f"Topico_{section.get('section', 0)}")
@@ -1159,18 +1417,19 @@ def download_all_course_materials_to_obsidian(
                 fname = _safe_filename(content_item.get("filename") or f"{mname}.bin")
                 furl = content_item.get("fileurl")
                 if ctype == "file" and furl:
-                    dest = sec_dir / fname
                     try:
                         if fname.lower().endswith((".html", ".htm")):
                             r = _authed_get(furl, instance, timeout=30)
                             sec_dir.mkdir(parents=True, exist_ok=True)
-                            md_dest = sec_dir / f"{Path(fname).stem}.md"
+                            # Cada página do Moodle chama-se `index.html`: o nome útil é o do módulo.
+                            stem = mname if Path(fname).stem.lower() == "index" else Path(fname).stem
+                            md_dest = _unique_path(sec_dir / f"{_safe_filename(stem)}.md", used)
                             _write_note(md_dest, f"# {mname}\n\n{_html_to_markdown(r.text)}\n")
                             downloaded.append(str(md_dest))
                         else:
                             res = download_moodle_file(
                                 furl,
-                                str(dest),
+                                str(_unique_path(sec_dir / fname, used)),
                                 extract_pdf_to_markdown=extract_pdfs,
                                 instance=instance,
                             )
@@ -1178,8 +1437,8 @@ def download_all_course_materials_to_obsidian(
                     except Exception as e:
                         errors.append({"file": fname, "error": str(e)})
 
-    # Also download assignment attachment files (enunciados de e-fólios)
-    assign_resp = get_assignments(instance=instance)
+    # Enunciados anexados aos trabalhos (e-fólios)
+    assign_resp = _soft(get_assignments, instance=instance, default={}, errors=errors, what="trabalhos")
     if isinstance(assign_resp, dict):
         for c in assign_resp.get("courses", []):
             if int(c.get("id", 0)) == int(course_id):
@@ -1193,7 +1452,7 @@ def download_all_course_materials_to_obsidian(
                             try:
                                 res = download_moodle_file(
                                     furl,
-                                    str(efolios_dir / f"{aname}_{fname}"),
+                                    str(_unique_path(efolios_dir / _safe_filename(f"{aname}_{fname}"), used)),
                                     extract_pdf_to_markdown=extract_pdfs,
                                     instance=instance,
                                 )
@@ -1333,8 +1592,8 @@ async def upload_file_to_draft(
     }
     with path.open("rb") as f:
         files = {"file_1": (path.name, f)}
-        response = _request("POST", upload_url, data=fields, files=files, timeout=90)
-    return sanitize.clean_payload(_redact_secrets(response.json()))
+        response = _request("POST", upload_url, data=fields, files=files, timeout=90, retry=False)
+    return sanitize.clean_payload(_redact_secrets(_json(response)))
 
 
 @mcp.tool(annotations=_ann("Submeter trabalho / e-fólio", destructive=True, idempotent=False))
@@ -1485,11 +1744,11 @@ def search_all_course_forums(
     for f in forums:
         fid = f.get("id")
         fname = f.get("name", f"Fórum {fid}")
-        discs = get_forum_discussions(fid, instance=instance)
+        discs = _soft(get_forum_discussions, fid, instance=instance, default={})
         for d in discs.get("discussions", []) if isinstance(discs, dict) else []:
             did = d.get("discussion") or d.get("id")
             dname = d.get("name", "")
-            posts_resp = get_discussion_posts(did, instance=instance)
+            posts_resp = _soft(get_discussion_posts, did, instance=instance, default={})
             posts = posts_resp.get("posts", []) if isinstance(posts_resp, dict) else []
             for p in posts:
                 subj = p.get("subject", "")
@@ -1664,36 +1923,38 @@ def get_messages(
 
 
 @mcp.tool(annotations=_ann("Exportar fóruns para o Vault"))
-def export_forum_discussions_to_obsidian(
+async def export_forum_discussions_to_obsidian(
     course_id: CourseId,
     instance: Inst = DEFAULT_INSTANCE,
+    vault_dir: VaultDir = "",
 ) -> dict[str, Any]:
     """
     Exporta todos os fóruns e debates de uma disciplina para ficheiros Markdown organizados no Obsidian
     (`<Vault>/Unidades Curriculares/<UC>/Foruns/`).
     Útil para teres as orientações do professor e as discussões assíncronas no Vault.
     """
+    return await _in_thread(export_course_forums, course_id, instance, vault_dir)
+
+
+def export_course_forums(
+    course_id: int, instance: str = DEFAULT_INSTANCE, vault_dir: str = ""
+) -> dict[str, Any]:
+    """Implementação de `export_forum_discussions_to_obsidian` (síncrona, corre numa thread)."""
     forums = get_course_forums(course_id, instance=instance)
     if not isinstance(forums, list):
         return {"error": True, "details": forums}
 
-    cname = f"UC_{course_id}"
-    courses_resp = get_enrolled_courses("all", instance=instance)
-    courses = courses_resp.get("courses", []) if isinstance(courses_resp, dict) else courses_resp
-    if isinstance(courses, list):
-        for c in courses:
-            if int(c.get("id", 0)) == int(course_id):
-                cname = _safe_filename(c.get("fullname") or c.get("shortname") or cname)
-                break
+    cname = _course_folder_name(course_id, instance)
 
-    foruns_dir = _resolve_in_vault(Path("Unidades Curriculares") / cname / "Foruns")
+    foruns_dir = _resolve_in_vault(_sync_root(vault_dir) / "Unidades Curriculares" / cname / "Foruns")
     foruns_dir.mkdir(parents=True, exist_ok=True)
 
     exported_files = []
+    used: set[Path] = set()
     for f in forums:
         fid = f.get("id")
         fname = _safe_filename(f.get("name", f"Forum_{fid}"))
-        discs_resp = get_forum_discussions(fid, instance=instance)
+        discs_resp = _soft(get_forum_discussions, fid, instance=instance, default={})
         discussions = discs_resp.get("discussions", []) if isinstance(discs_resp, dict) else []
         if not discussions:
             continue
@@ -1702,7 +1963,7 @@ def export_forum_discussions_to_obsidian(
             "---",
             f"forum_id: {fid}",
             f"course_id: {course_id}",
-            f'title: "{fname}"',
+            f"title: {_yaml(fname)}",
             f"tags: [moodle, forum, {instance}]",
             "---",
             "",
@@ -1714,7 +1975,7 @@ def export_forum_discussions_to_obsidian(
             did = d.get("discussion") or d.get("id")
             dname = d.get("name", f"Discussão {did}")
             lines.append(f"## 🧵 {dname} (`discussion_id: {did}`)\n")
-            posts_resp = get_discussion_posts(did, instance=instance)
+            posts_resp = _soft(get_discussion_posts, did, instance=instance, default={})
             posts = posts_resp.get("posts", []) if isinstance(posts_resp, dict) else []
             for p in reversed(posts):
                 pid = p.get("id")
@@ -1733,7 +1994,7 @@ def export_forum_discussions_to_obsidian(
                     ]
                 )
 
-        fpath = foruns_dir / f"{fname}.md"
+        fpath = _unique_path(foruns_dir / f"{fname}.md", used)
         _write_note(fpath, "\n".join(lines))
         exported_files.append(str(fpath))
 
@@ -1745,15 +2006,70 @@ def export_forum_discussions_to_obsidian(
     }
 
 
+def _course_folder_name(course_id: int, instance: str) -> str:
+    """Nome da pasta de uma UC no Vault; `UC_<id>` se o nome não puder ser obtido."""
+    courses_resp = _soft(get_enrolled_courses, "all", instance=instance, default=[])
+    courses = courses_resp.get("courses", []) if isinstance(courses_resp, dict) else courses_resp
+    for c in courses if isinstance(courses, list) else []:
+        if int(c.get("id", 0)) == int(course_id):
+            return _safe_filename(c.get("fullname") or c.get("shortname") or f"UC_{course_id}")
+    return f"UC_{course_id}"
+
+
+def _sync_root(vault_dir: str = "") -> Path:
+    """Pasta do Vault onde ficam o painel e `Unidades Curriculares`.
+
+    Por ordem: o `vault_dir` da chamada, a opção `sync_subdir`
+    (`MOODLE_MCP_SYNC_SUBDIR`) e a raiz do Vault. Sempre confinada ao Vault.
+    """
+    return _resolve_in_vault(vault_dir or config.get("sync_subdir") or ".")
+
+
+def _dashboard_name(instance: str) -> str:
+    """Nome da nota do painel; com várias instâncias, uma por instância.
+
+    Com um único nome, sincronizar a segunda instância apagava o painel da
+    primeira.
+    """
+    base = _safe_filename(config.get("dashboard_name") or "Painel Moodle")
+    return f"{base} ({instance})" if len(config.instances()) > 1 else base
+
+
+async def _in_thread(fn: Any, *args: Any, **kwargs: Any) -> Any:
+    """Corre trabalho bloqueante (HTTP, disco) numa thread.
+
+    O FastMCP chama ferramentas síncronas diretamente no event loop: uma
+    sincronização de minutos deixava o servidor surdo a pings, cancelamentos e
+    a outros pedidos do cliente.
+    """
+    return await anyio.to_thread.run_sync(functools.partial(fn, *args, **kwargs))
+
+
+def _progress_reporter(ctx: Context | None) -> Any:
+    """Devolve um callback que envia progresso ao cliente a partir da thread de trabalho."""
+    if ctx is None:
+        return None
+
+    def report(done: int, total: int, message: str) -> None:
+        try:
+            anyio.from_thread.run(ctx.report_progress, done, total, message)
+        except Exception:  # progresso é informativo: nunca interrompe a sincronização
+            logger.debug("Não foi possível enviar progresso.", exc_info=True)
+
+    return report
+
+
 def _count_my_forum_posts(forum_id: int, userid: int, instance: str = DEFAULT_INSTANCE) -> tuple[int, int]:
     """Conta as discussões de um fórum e quantos posts (tópicos ou respostas) são do próprio aluno."""
     discussions: list[dict[str, Any]] = []
     page = 0
     while True:
-        resp = _moodle_call(
+        resp = _soft(
+            _moodle_call,
             "mod_forum_get_forum_discussions",
             {"forumid": forum_id, "perpage": 50, "page": page},
             instance=instance,
+            default={},
         )
         batch = resp.get("discussions", []) if isinstance(resp, dict) else []
         discussions.extend(batch)
@@ -1763,10 +2079,12 @@ def _count_my_forum_posts(forum_id: int, userid: int, instance: str = DEFAULT_IN
 
     mine = 0
     for disc in discussions:
-        posts_resp = _moodle_call(
+        posts_resp = _soft(
+            _moodle_call,
             "mod_forum_get_discussion_posts",
             {"discussionid": disc.get("discussion")},
             instance=instance,
+            default={},
         )
         for post in posts_resp.get("posts", []) if isinstance(posts_resp, dict) else []:
             if (post.get("author") or {}).get("id") == userid:
@@ -1774,11 +2092,263 @@ def _count_my_forum_posts(forum_id: int, userid: int, instance: str = DEFAULT_IN
     return len(discussions), mine
 
 
+def _sync_course(
+    course: dict[str, Any],
+    note_name: str,
+    *,
+    userid: int,
+    instance: str,
+    base_url: str,
+    uc_dir: Path,
+    assign_by_course: dict[int, list[dict[str, Any]]],
+    now_str: str,
+    download_materials: bool,
+    export_forums: bool,
+    errors: list[dict[str, str]],
+    vault_dir: str,
+    link_root: str,
+    dashboard: str,
+) -> tuple[list[str], list[tuple[int, str, str, str, str, Any, str]], list[tuple[str, str, str]], list[str]]:
+    """Sincroniza uma UC e devolve o que entra no painel.
+
+    Isolada numa função para que a falha de uma disciplina não aborte as
+    outras: o chamador só junta ao painel o que esta devolve com sucesso, e as
+    secções opcionais (notas, fóruns, escolhas, testes, conteúdos) degradam para
+    vazio com o erro registado em `errors`.
+
+    Returns:
+        `(linhas_do_painel, prazos, escolhas_pendentes, ficheiros_escritos)`.
+    """
+    dashboard_lines: list[str] = []
+    upcoming_items: list[tuple[int, str, str, str, str, Any, str]] = []
+    pending_choices: list[tuple[str, str, str]] = []
+    created_files: list[str] = []
+
+    cid = int(course["id"])
+    cname = course.get("fullname") or course.get("shortname") or f"Curso {cid}"
+    safe_name = note_name
+    progress = course.get("progress")
+    prog_str = f"{int(progress)}%" if progress is not None else "—"
+
+    grades_resp = _soft(
+        get_course_grades, cid, userid, instance=instance, default={}, errors=errors, what=f"{cname}: notas"
+    )
+    grade_items = []
+    course_total = "—"
+    if isinstance(grades_resp, dict):
+        usergrades = grades_resp.get("usergrades", [])
+        if usergrades:
+            grade_items = usergrades[0].get("gradeitems", [])
+            for gi in grade_items:
+                if gi.get("itemtype") == "course":
+                    course_total = gi.get("gradeformatted") or "—"
+
+    course_assigns = assign_by_course.get(cid, [])
+    uc_note_name = f"{safe_name}.md"
+    dashboard_lines.append(
+        f"| `{cid}` | **{_cell(cname)}** | {prog_str} | **{course_total}** | {len(course_assigns)} | [[{link_root}Unidades Curriculares/{safe_name}\\|Abrir UC]] |"
+    )
+
+    uc_lines = [
+        "---",
+        f"course_id: {cid}",
+        f"title: {_yaml(cname)}",
+        f'progress: "{prog_str}"',
+        f"updated: {now_str}",
+        f"tags: [moodle, uc, {instance}]",
+        "---",
+        "",
+        f"# 📘 {cname}",
+        "",
+        f"⬅️ Voltar a [[{link_root}{dashboard}\\|{dashboard}]] | 🔗 [Abrir no Moodle]({base_url}/course/view.php?id={cid})",
+        "",
+        "## 📊 Avaliações e Notas (`gradereport`)",
+        "",
+        "| Item de Avaliação | Nota | Intervalo | Feedback do Professor |",
+        "|:---|:---:|:---:|:---|",
+    ]
+
+    for gi in grade_items:
+        iname = gi.get("itemname") or ("Total da Disciplina" if gi.get("itemtype") == "course" else "Item")
+        gval = gi.get("gradeformatted") or "—"
+        gmin = gi.get("grademin", "")
+        gmax = gi.get("grademax", "")
+        fb = _html_to_markdown(gi.get("feedback", ""))
+        uc_lines.append(f"| {_cell(iname)} | **{_cell(gval)}** | {gmin}–{gmax} | {_cell(fb)} |")
+
+    uc_lines.extend(
+        [
+            "",
+            "## 📝 Trabalhos, E-fólios e P-fólios (`mod_assign`)",
+            "",
+        ]
+    )
+
+    if not course_assigns:
+        uc_lines.append("_Nenhum trabalho registado nesta disciplina._")
+    else:
+        for a in course_assigns:
+            aid = a.get("id")
+            aname = a.get("name", f"Trabalho {aid}")
+            duedate = a.get("duedate", 0)
+            due_str = datetime.fromtimestamp(duedate).strftime("%Y-%m-%d %H:%M") if duedate else "Sem prazo"
+            intro = _html_to_markdown(a.get("intro", ""))
+
+            # Check student's submission status
+            sub_status = "—"
+            grading_status = "—"
+            try:
+                sub_resp = get_assignment_submission(int(aid or 0), userid, instance=instance)
+                if isinstance(sub_resp, dict) and "lastattempt" in sub_resp:
+                    sub_obj = sub_resp["lastattempt"].get("submission", {})
+                    sub_status = sub_obj.get("status", "—")
+                    grading_status = sub_resp["lastattempt"].get("gradingstatus", "—")
+            except Exception:
+                pass
+
+            uc_lines.extend(
+                [
+                    f"### 📌 {aname} (`assign_id: {aid}`)",
+                    f"- **Prazo de entrega:** `{due_str}`",
+                    f"- **Estado da Submissão:** `{sub_status}` | **Avaliação:** `{grading_status}`",
+                ]
+            )
+            if intro:
+                uc_lines.append(f"- **Enunciado / Descrição:**\n\n{intro}\n")
+            uc_lines.append("")
+            if duedate:
+                upcoming_items.append((duedate, due_str, cname, aname, "trabalho", aid, sub_status))
+
+    # Fóruns com prazo (frequentemente avaliados) — contam para a nota mas não são `mod_assign`
+    forums_resp = _soft(
+        get_course_forums, cid, instance=instance, default=[], errors=errors, what=f"{cname}: fóruns"
+    )
+    dated_forums = [f for f in (forums_resp if isinstance(forums_resp, list) else []) if f.get("duedate")]
+    if dated_forums:
+        uc_lines.extend(
+            [
+                "",
+                "## 🏛 Fóruns com prazo (`mod_forum`)",
+                "",
+                "| Prazo | Fórum | Discussões | Posts meus | cmid |",
+                "|:---|:---|:---:|:---:|---:|",
+            ]
+        )
+        for f in dated_forums:
+            fdue = int(f.get("duedate") or 0)
+            fdue_str = datetime.fromtimestamp(fdue).strftime("%Y-%m-%d %H:%M")
+            n_disc, n_mine = _count_my_forum_posts(int(f["id"]), userid, instance=instance)
+            fstatus = f"{n_mine} post(s) meus" if n_mine else "sem participação"
+            uc_lines.append(
+                f"| `{fdue_str}` | [{_cell(f.get('name'))}]({base_url}/mod/forum/view.php?id={f.get('cmid')}) "
+                f"| {n_disc} | {n_mine} | `{f.get('cmid')}` |"
+            )
+            upcoming_items.append(
+                (fdue, fdue_str, cname, f.get("name", "Fórum"), "fórum", f.get("cmid"), fstatus)
+            )
+
+    # Escolhas (`mod_choice`) ainda sem resposta — p.ex. opção de frequência de módulo
+    choices_resp = _soft(
+        _moodle_call,
+        "mod_choice_get_choices_by_courses",
+        {"courseids[0]": cid},
+        instance=instance,
+        default={},
+        errors=errors,
+        what=f"{cname}: escolhas",
+    )
+    for ch in choices_resp.get("choices", []) if isinstance(choices_resp, dict) else []:
+        opts_resp = _soft(
+            _moodle_call,
+            "mod_choice_get_choice_options",
+            {"choiceid": ch.get("id")},
+            instance=instance,
+            default={},
+        )
+        options = opts_resp.get("options", []) if isinstance(opts_resp, dict) else []
+        if options and not any(o.get("checked") for o in options):
+            ch_url = f"{base_url}/mod/choice/view.php?id={ch.get('coursemodule')}"
+            pending_choices.append((cname, ch.get("name", "Escolha"), ch_url))
+            uc_lines.extend(
+                [
+                    "",
+                    f"> ⚠️ **Escolha por responder:** [{ch.get('name')}]({ch_url}) "
+                    f"({len(options)} opções disponíveis)",
+                ]
+            )
+
+    # Testes (`mod_quiz`) com data de fecho
+    quizzes_resp = _soft(
+        _moodle_call,
+        "mod_quiz_get_quizzes_by_courses",
+        {"courseids[0]": cid},
+        instance=instance,
+        default={},
+        errors=errors,
+        what=f"{cname}: testes",
+    )
+    for qz in quizzes_resp.get("quizzes", []) if isinstance(quizzes_resp, dict) else []:
+        qclose = int(qz.get("timeclose") or 0)
+        if qclose:
+            qclose_str = datetime.fromtimestamp(qclose).strftime("%Y-%m-%d %H:%M")
+            upcoming_items.append(
+                (qclose, qclose_str, cname, qz.get("name", "Teste"), "teste", qz.get("coursemodule"), "—")
+            )
+
+    contents = _soft(
+        get_course_contents, cid, instance=instance, default=None, errors=errors, what=f"{cname}: conteúdos"
+    )
+    uc_lines.extend(["", "## 📂 Conteúdos, Tópicos e Materiais da Disciplina", ""])
+    if isinstance(contents, list):
+        for section in contents:
+            sec_name = section.get("name") or f"Secção {section.get('section', '')}"
+            uc_lines.append(f"### {sec_name}")
+            sec_summary = _html_to_markdown(section.get("summary", ""))
+            if sec_summary:
+                uc_lines.append(sec_summary)
+            for mod in section.get("modules", []):
+                mname = mod.get("name", "Recurso")
+                mtype = mod.get("modname", "")
+                murl = mod.get("url", "")
+                mid = mod.get("instance", "")
+                cmid = mod.get("id", "")
+                comp = mod.get("completiondata", {}).get("state", 0)
+                check = "✅" if comp == 1 else "⬜"
+                if murl:
+                    uc_lines.append(f"- {check} [{mname}]({murl}) (`{mtype}`, id: `{mid}`, cmid: `{cmid}`)")
+                else:
+                    uc_lines.append(f"- {check} {mname} (`{mtype}`, id: `{mid}`, cmid: `{cmid}`)")
+            uc_lines.append("")
+
+    uc_file = uc_dir / uc_note_name
+    _write_note(uc_file, "\n".join(uc_lines))
+    created_files.append(str(uc_file))
+
+    for wanted, extra, label in (
+        (download_materials, download_course_materials, "materiais"),
+        (export_forums, export_course_forums, "fóruns exportados"),
+    ):
+        if wanted:
+            res = _soft(
+                extra,
+                cid,
+                instance=instance,
+                vault_dir=vault_dir,
+                default={},
+                errors=errors,
+                what=f"{cname}: {label}",
+            )
+            for err in res.get("errors", []) if isinstance(res, dict) else []:
+                errors.append(
+                    {"item": f"{cname}: {label}: {err.get('file', '')}", "error": err.get("error", "")}
+                )
+
+    return dashboard_lines, upcoming_items, pending_choices, created_files
+
+
 @mcp.tool(annotations=_ann("Sincronizar painel no Obsidian"))
-def sync_doctoral_dashboard_to_obsidian(
-    vault_dir: Annotated[
-        str, Field(description="Subdiretório alternativo dentro do Vault; vazio escreve na raiz do Vault.")
-    ] = "",
+async def sync_doctoral_dashboard_to_obsidian(
+    vault_dir: VaultDir = "",
     download_materials: Annotated[
         bool, Field(description="Se descarrega também todos os PDFs e materiais de cada UC.")
     ] = False,
@@ -1786,6 +2356,7 @@ def sync_doctoral_dashboard_to_obsidian(
         bool, Field(description="Se exporta também todos os tópicos dos fóruns para Markdown.")
     ] = False,
     instance: Inst = DEFAULT_INSTANCE,
+    ctx: Context = None,  # type: ignore[assignment]  # injetado pelo FastMCP
 ) -> dict[str, Any]:
     """
     Sincroniza todas as disciplinas inscritas, notas detalhadas, estado de submissão dos e-fólios/p-fólios,
@@ -1793,8 +2364,39 @@ def sync_doctoral_dashboard_to_obsidian(
     Se `download_materials=True`, descarrega também todos os PDFs e converte-os para Markdown!
     Se `export_forums=True`, exporta também todos os tópicos dos fóruns para o Obsidian!
     """
+    return await _in_thread(
+        sync_dashboard,
+        vault_dir,
+        download_materials,
+        export_forums,
+        instance,
+        on_progress=_progress_reporter(ctx),
+    )
+
+
+def sync_dashboard(
+    vault_dir: str = "",
+    download_materials: bool = False,
+    export_forums: bool = False,
+    instance: str = DEFAULT_INSTANCE,
+    on_progress: Any = None,
+) -> dict[str, Any]:
+    """Implementação de `sync_doctoral_dashboard_to_obsidian` (síncrona, corre numa thread).
+
+    Também usada pelo capturador `moodlemobile://`, que não tem um cliente MCP.
+
+    Args:
+        vault_dir: Subpasta do Vault; vazio usa a configuração ou a raiz.
+        download_materials: Se descarrega os materiais de cada UC.
+        export_forums: Se exporta os fóruns de cada UC.
+        instance: Nome da instância.
+        on_progress: `callback(feitas, total, mensagem)` chamado antes de cada UC.
+
+    Returns:
+        O resumo da sincronização.
+    """
     base_url, _ = _resolve_target(instance)
-    target_dir = _resolve_in_vault(vault_dir) if vault_dir else _vault_root()
+    target_dir = _sync_root(vault_dir)
     target_dir.mkdir(parents=True, exist_ok=True)
     uc_dir = target_dir / "Unidades Curriculares"
     uc_dir.mkdir(parents=True, exist_ok=True)
@@ -1811,7 +2413,7 @@ def sync_doctoral_dashboard_to_obsidian(
     if not isinstance(courses, list):
         courses = []
 
-    assign_resp = get_assignments(instance=instance)
+    assign_resp = _soft(get_assignments, instance=instance, default={})
     assign_by_course: dict[int, list[dict[str, Any]]] = {}
     if isinstance(assign_resp, dict):
         for c in assign_resp.get("courses", []):
@@ -1840,195 +2442,48 @@ def sync_doctoral_dashboard_to_obsidian(
     pending_choices: list[tuple[str, str, str]] = []
     created_files = []
 
-    for course in courses:
-        cid = int(course["id"])
-        cname = course.get("fullname") or course.get("shortname") or f"Curso {cid}"
-        safe_name = _safe_filename(cname)
-        progress = course.get("progress")
-        prog_str = f"{int(progress)}%" if progress is not None else "—"
-
-        grades_resp = get_course_grades(cid, userid, instance=instance)
-        grade_items = []
-        course_total = "—"
-        if isinstance(grades_resp, dict):
-            usergrades = grades_resp.get("usergrades", [])
-            if usergrades:
-                grade_items = usergrades[0].get("gradeitems", [])
-                for gi in grade_items:
-                    if gi.get("itemtype") == "course":
-                        course_total = gi.get("gradeformatted") or "—"
-
-        course_assigns = assign_by_course.get(cid, [])
-        uc_note_name = f"{safe_name}.md"
-        dashboard_lines.append(
-            f"| `{cid}` | **{cname}** | {prog_str} | **{course_total}** | {len(course_assigns)} | [[Unidades Curriculares/{safe_name}\\|Abrir UC]] |"
-        )
-
-        uc_lines = [
-            "---",
-            f"course_id: {cid}",
-            f'title: "{cname}"',
-            f'progress: "{prog_str}"',
-            f"updated: {now_str}",
-            f"tags: [moodle, uc, {instance}]",
-            "---",
-            "",
-            f"# 📘 {cname}",
-            "",
-            f"⬅️ Voltar a [[Doutoramento - Painel Moodle]] | 🔗 [Abrir no Moodle]({base_url}/course/view.php?id={cid})",
-            "",
-            "## 📊 Avaliações e Notas (`gradereport`)",
-            "",
-            "| Item de Avaliação | Nota | Intervalo | Feedback do Professor |",
-            "|:---|:---:|:---:|:---|",
-        ]
-
-        for gi in grade_items:
-            iname = gi.get("itemname") or (
-                "Total da Disciplina" if gi.get("itemtype") == "course" else "Item"
+    errors: list[dict[str, str]] = []
+    used_notes: set[Path] = set()
+    synced = 0
+    dashboard = _dashboard_name(instance)
+    relative = target_dir.relative_to(_vault_root()).as_posix()
+    link_root = "" if relative == "." else f"{relative}/"
+    for position, course in enumerate(courses):
+        cname = course.get("fullname") or course.get("shortname") or f"Curso {course.get('id')}"
+        if on_progress:
+            on_progress(position, len(courses), cname)
+        # UCs com o mesmo nome escreviam a mesma nota; o painel liga ao nome único.
+        note_name = _unique_path(Path(_safe_filename(cname) + ".md"), used_notes).stem
+        try:
+            rows, upcoming, choices, files = _sync_course(
+                course,
+                note_name,
+                userid=userid,
+                instance=instance,
+                base_url=base_url,
+                uc_dir=uc_dir,
+                assign_by_course=assign_by_course,
+                now_str=now_str,
+                download_materials=download_materials,
+                export_forums=export_forums,
+                errors=errors,
+                vault_dir=vault_dir,
+                link_root=link_root,
+                dashboard=dashboard,
             )
-            gval = gi.get("gradeformatted") or "—"
-            gmin = gi.get("grademin", "")
-            gmax = gi.get("grademax", "")
-            fb = _html_to_markdown(gi.get("feedback", "")).replace("\n", " ")
-            uc_lines.append(f"| {iname} | **{gval}** | {gmin}–{gmax} | {fb} |")
-
-        uc_lines.extend(
-            [
-                "",
-                "## 📝 Trabalhos, E-fólios e P-fólios (`mod_assign`)",
-                "",
-            ]
-        )
-
-        if not course_assigns:
-            uc_lines.append("_Nenhum trabalho registado nesta disciplina._")
-        else:
-            for a in course_assigns:
-                aid = a.get("id")
-                aname = a.get("name", f"Trabalho {aid}")
-                duedate = a.get("duedate", 0)
-                due_str = (
-                    datetime.fromtimestamp(duedate).strftime("%Y-%m-%d %H:%M") if duedate else "Sem prazo"
-                )
-                intro = _html_to_markdown(a.get("intro", ""))
-
-                # Check student's submission status
-                sub_status = "—"
-                grading_status = "—"
-                try:
-                    sub_resp = get_assignment_submission(int(aid), userid, instance=instance)
-                    if isinstance(sub_resp, dict) and "lastattempt" in sub_resp:
-                        sub_obj = sub_resp["lastattempt"].get("submission", {})
-                        sub_status = sub_obj.get("status", "—")
-                        grading_status = sub_resp["lastattempt"].get("gradingstatus", "—")
-                except Exception:
-                    pass
-
-                uc_lines.extend(
-                    [
-                        f"### 📌 {aname} (`assign_id: {aid}`)",
-                        f"- **Prazo de entrega:** `{due_str}`",
-                        f"- **Estado da Submissão:** `{sub_status}` | **Avaliação:** `{grading_status}`",
-                    ]
-                )
-                if intro:
-                    uc_lines.append(f"- **Enunciado / Descrição:**\n\n{intro}\n")
-                uc_lines.append("")
-                if duedate:
-                    upcoming_items.append((duedate, due_str, cname, aname, "trabalho", aid, sub_status))
-
-        # Fóruns com prazo (frequentemente avaliados) — contam para a nota mas não são `mod_assign`
-        forums_resp = get_course_forums(cid, instance=instance)
-        dated_forums = [f for f in (forums_resp if isinstance(forums_resp, list) else []) if f.get("duedate")]
-        if dated_forums:
-            uc_lines.extend(
-                [
-                    "",
-                    "## 🏛 Fóruns com prazo (`mod_forum`)",
-                    "",
-                    "| Prazo | Fórum | Discussões | Posts meus | cmid |",
-                    "|:---|:---|:---:|:---:|---:|",
-                ]
-            )
-            for f in dated_forums:
-                fdue = int(f.get("duedate") or 0)
-                fdue_str = datetime.fromtimestamp(fdue).strftime("%Y-%m-%d %H:%M")
-                n_disc, n_mine = _count_my_forum_posts(int(f["id"]), userid, instance=instance)
-                fstatus = f"{n_mine} post(s) meus" if n_mine else "sem participação"
-                uc_lines.append(
-                    f"| `{fdue_str}` | [{f.get('name')}]({base_url}/mod/forum/view.php?id={f.get('cmid')}) "
-                    f"| {n_disc} | {n_mine} | `{f.get('cmid')}` |"
-                )
-                upcoming_items.append(
-                    (fdue, fdue_str, cname, f.get("name", "Fórum"), "fórum", f.get("cmid"), fstatus)
-                )
-
-        # Escolhas (`mod_choice`) ainda sem resposta — p.ex. opção de frequência de módulo
-        choices_resp = _moodle_call(
-            "mod_choice_get_choices_by_courses", {"courseids[0]": cid}, instance=instance
-        )
-        for ch in choices_resp.get("choices", []) if isinstance(choices_resp, dict) else []:
-            opts_resp = _moodle_call(
-                "mod_choice_get_choice_options", {"choiceid": ch.get("id")}, instance=instance
-            )
-            options = opts_resp.get("options", []) if isinstance(opts_resp, dict) else []
-            if options and not any(o.get("checked") for o in options):
-                ch_url = f"{base_url}/mod/choice/view.php?id={ch.get('coursemodule')}"
-                pending_choices.append((cname, ch.get("name", "Escolha"), ch_url))
-                uc_lines.extend(
-                    [
-                        "",
-                        f"> ⚠️ **Escolha por responder:** [{ch.get('name')}]({ch_url}) "
-                        f"({len(options)} opções disponíveis)",
-                    ]
-                )
-
-        # Testes (`mod_quiz`) com data de fecho
-        quizzes_resp = _moodle_call(
-            "mod_quiz_get_quizzes_by_courses", {"courseids[0]": cid}, instance=instance
-        )
-        for qz in quizzes_resp.get("quizzes", []) if isinstance(quizzes_resp, dict) else []:
-            qclose = int(qz.get("timeclose") or 0)
-            if qclose:
-                qclose_str = datetime.fromtimestamp(qclose).strftime("%Y-%m-%d %H:%M")
-                upcoming_items.append(
-                    (qclose, qclose_str, cname, qz.get("name", "Teste"), "teste", qz.get("coursemodule"), "—")
-                )
-
-        contents = get_course_contents(cid, instance=instance)
-        uc_lines.extend(["", "## 📂 Conteúdos, Tópicos e Materiais da Disciplina", ""])
-        if isinstance(contents, list):
-            for section in contents:
-                sec_name = section.get("name") or f"Secção {section.get('section', '')}"
-                uc_lines.append(f"### {sec_name}")
-                sec_summary = _html_to_markdown(section.get("summary", ""))
-                if sec_summary:
-                    uc_lines.append(sec_summary)
-                for mod in section.get("modules", []):
-                    mname = mod.get("name", "Recurso")
-                    mtype = mod.get("modname", "")
-                    murl = mod.get("url", "")
-                    mid = mod.get("instance", "")
-                    cmid = mod.get("id", "")
-                    comp = mod.get("completiondata", {}).get("state", 0)
-                    check = "✅" if comp == 1 else "⬜"
-                    if murl:
-                        uc_lines.append(
-                            f"- {check} [{mname}]({murl}) (`{mtype}`, id: `{mid}`, cmid: `{cmid}`)"
-                        )
-                    else:
-                        uc_lines.append(f"- {check} {mname} (`{mtype}`, id: `{mid}`, cmid: `{cmid}`)")
-                uc_lines.append("")
-
-        uc_file = uc_dir / uc_note_name
-        _write_note(uc_file, "\n".join(uc_lines))
-        created_files.append(str(uc_file))
-
-        if download_materials:
-            download_all_course_materials_to_obsidian(cid, extract_pdfs=True, instance=instance)
-        if export_forums:
-            export_forum_discussions_to_obsidian(cid, instance=instance)
+        except MoodleAPIError as exc:
+            if exc.errorcode in _FATAL_ERRORCODES:
+                raise
+            errors.append({"item": cname, "error": str(exc)})
+            continue
+        except Exception as exc:  # uma UC com dados inesperados não pode parar as outras
+            errors.append({"item": cname, "error": f"{type(exc).__name__}: {exc}"})
+            continue
+        dashboard_lines.extend(rows)
+        upcoming_items.extend(upcoming)
+        pending_choices.extend(choices)
+        created_files.extend(files)
+        synced += 1
 
     now_ts = int(datetime.now().timestamp())
     pending_states = {"new", "draft", "reopened", "sem participação", "—"}
@@ -2045,7 +2500,7 @@ def sync_doctoral_dashboard_to_obsidian(
         # Só sinaliza o que continua em falta: um prazo passado já entregue não é um alerta.
         flag = " ⚠️" if due_ts < now_ts and status in pending_states else ""
         dashboard_lines.append(
-            f"| `{due_str}`{flag} | {kind} | {cname} | **{aname}** | `{status}` | `{ref_id}` |"
+            f"| `{due_str}`{flag} | {kind} | {_cell(cname)} | **{_cell(aname)}** | `{status}` | `{ref_id}` |"
         )
 
     if pending_choices:
@@ -2061,15 +2516,19 @@ def sync_doctoral_dashboard_to_obsidian(
     dashboard_lines.append("")
     dashboard_lines.append("_⚠️ = prazo já ultrapassado e atividade ainda em falta._")
 
-    dashboard_file = target_dir / "Doutoramento - Painel Moodle.md"
+    if on_progress:
+        on_progress(len(courses), len(courses), "painel")
+    dashboard_file = target_dir / f"{dashboard}.md"
     _write_note(dashboard_file, "\n".join(dashboard_lines) + "\n")
     created_files.insert(0, str(dashboard_file))
 
     return {
-        "status": "ok",
+        "status": "ok" if not errors else "parcial",
         "student": fullname,
-        "courses_synced": len(courses),
+        "courses_synced": synced,
+        "courses_total": len(courses),
         "files_written": created_files,
+        "errors": errors,
     }
 
 
@@ -2243,9 +2702,11 @@ def apply_toolsets(enabled: set[str]) -> list[str]:
         for tool_name in tool_names:
             try:
                 mcp.remove_tool(tool_name)
-                removed.append(tool_name)
-            except Exception as exc:  # pragma: no cover - nome inexistente
-                logger.warning("Não foi possível retirar '%s': %s", tool_name, exc)
+            except Exception as exc:
+                # Falhar em fechado: continuar exporia ferramentas (p.ex. `write`)
+                # que a configuração mandou esconder.
+                raise RuntimeError(f"Não foi possível retirar a ferramenta '{tool_name}': {exc}") from exc
+            removed.append(tool_name)
     return sorted(removed)
 
 
@@ -2260,11 +2721,15 @@ def main(argv: list[str] | None = None) -> int:
     """
     # stdout é o canal JSON-RPC do transporte stdio: qualquer escrita nele
     # corrompe o protocolo. Todo o diagnóstico vai para stderr.
+    # `force=True`: o FastMCP já configura o logger raiz na importação, e sem
+    # isto o basicConfig não fazia nada (MOODLE_MCP_LOG_LEVEL era ignorado).
+    level_name = os.getenv("MOODLE_MCP_LOG_LEVEL", "INFO").strip().upper()
+    level = logging.getLevelNamesMapping().get(level_name, logging.INFO)
     logging.basicConfig(
-        stream=sys.stderr,
-        level=os.getenv("MOODLE_MCP_LOG_LEVEL", "INFO").upper(),
-        format="%(levelname)s [%(name)s] %(message)s",
+        stream=sys.stderr, level=level, format="%(levelname)s [%(name)s] %(message)s", force=True
     )
+    if level_name not in logging.getLevelNamesMapping():
+        logger.warning("MOODLE_MCP_LOG_LEVEL='%s' inválido; a usar INFO.", level_name)
 
     parser = argparse.ArgumentParser(
         prog="moodle-mcp",
@@ -2305,6 +2770,17 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help=f"Remove o registo do esquema {handler.SCHEME}://, e termina.",
     )
+    parser.add_argument(
+        "--login",
+        nargs="?",
+        const="",
+        metavar="INSTÂNCIA",
+        help=(
+            "Inicia o login pelo navegador (SSO incluído) com um link de uso único e termina. "
+            "Requer o handler instalado (--install-handler)."
+        ),
+    )
+    parser.add_argument("--no-browser", action="store_true", help="Com --login: só mostra o link.")
     parser.add_argument("--version", action="version", version=f"moodle-mcp {__version__}")
     args = parser.parse_args(argv)
 
@@ -2321,11 +2797,24 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 print(f"{key}: {value}")
         if args.install_handler:
-            print(
-                "\nPara autenticar: faz login no Moodle no navegador e abre "
-                "<url-do-moodle>/admin/tool/mobile/launch.php"
-                "?service=moodle_mobile_app&passport=12345"
-            )
+            print("\nPara autenticar: faz login no Moodle no navegador e corre `moodle-mcp --login`.")
+        return 0
+
+    if args.login is not None:
+        try:
+            pending = login.start_login(args.login)
+        except (login.LoginError, ValueError) as exc:
+            parser.error(str(exc))
+        print(
+            f"Login em '{pending['instance']}'. Abre este endereço no navegador onde tens sessão no Moodle:"
+        )
+        print(f"\n  {pending['url']}\n")
+        print(
+            "Aceita o pedido para abrir o Moodle Token Catcher. O link serve uma única vez e "
+            f"expira em {pending['expires_in'] // 60} minutos. Resultado em: {config.config_dir() / 'last_auth.log'}"
+        )
+        if not args.no_browser:
+            webbrowser.open(pending["url"])
         return 0
 
     if args.show_config:
@@ -2346,6 +2835,9 @@ def main(argv: list[str] | None = None) -> int:
         enabled = resolve_toolsets(args.tools)
     except ValueError as exc:
         parser.error(str(exc))
+
+    for warning in config.security_warnings():
+        logger.warning("Segurança: %s", warning)
 
     removed = apply_toolsets(enabled)
     titles = strip_schema_titles()

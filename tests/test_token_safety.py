@@ -148,7 +148,7 @@ def test_course_materials_errors_have_no_token(vault, monkeypatch):
     responses.get(FILE, status=404)
     responses.get(page, status=503)
 
-    result = server.download_all_course_materials_to_obsidian(42, extract_pdfs=False, instance="test")
+    result = server.download_course_materials(42, extract_pdfs=False, instance="test")
 
     assert len(result["errors"]) == 3
     assert TOKEN not in json.dumps(result)
@@ -283,8 +283,14 @@ def test_warns_when_environment_token_wins(cfg_dir, monkeypatch):
 # ------------------------------------------------------------------------------
 
 
-def _payload(token="abcdef0123456789abcdef0123456+/x"):
-    return base64.b64encode(f"assinatura:::{token}:::privado".encode()).decode()
+def _payload(token="abcdef0123456789abcdef0123456+/x", instance="uab"):
+    """Payload assinado como o Moodle o assina, para um login iniciado agora."""
+    from moodle_mcp import login
+
+    pending = login.start_login(instance)
+    passport = pending["url"].rsplit("passport=", 1)[1]
+    site = login.signature(config.resolve_instance(instance).url, passport)
+    return base64.b64encode(f"{site}:::{token}:::privado".encode()).decode()
 
 
 @responses.activate

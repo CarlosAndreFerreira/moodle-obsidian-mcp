@@ -13,22 +13,29 @@ mecanismos não se parecem:
   em `~/.local/share/applications`, mais `xdg-mime default`.
 * Windows: chaves em `HKEY_CURRENT_USER/Software/Classes/moodlemobile`. Fica no
   ramo do utilizador, pelo que não precisa de privilégios de administrador.
-* macOS: um pacote `.app` mínimo com `CFBundleURLTypes` no `Info.plist`, dado a
-  conhecer ao Launch Services com `lsregister`.
+* macOS: um applet AppleScript (compilado com `osacompile`) que recebe o URL
+  por Apple Event em `on open location`, com `CFBundleURLTypes` no `Info.plist`,
+  dado a conhecer ao Launch Services com `lsregister`.
 
 O conteúdo de cada artefacto é produzido por funções puras
-(`desktop_entry`, `info_plist`, `windows_registry_values`), separadas da escrita,
+(`desktop_entry`, `applescript_source`, `windows_registry_values`), separadas da escrita,
 para que o resultado dos três sistemas possa ser verificado em qualquer um deles.
 """
 
 from __future__ import annotations
 
+import importlib
 import os
 import platform
+import plistlib
+import re
+import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
+from typing import Any
 
 from moodle_mcp import __version__
 
@@ -92,6 +99,25 @@ def _quote(part: str) -> str:
 # ==============================================================================
 
 
+_DESKTOP_RESERVED = set(" \t\n\"'\\><~|&;$*?#()`")
+
+
+def _desktop_arg(part: str) -> str:
+    """Escapa um argumento do `Exec=` segundo a especificação XDG Desktop Entry.
+
+    `%` tem de ser `%%` (senão é lido como código de campo, como `%u`); um
+    argumento com caracteres reservados vai entre aspas, com aspas, acentos
+    graves, `$` e barras invertidas escapados; e, por ser um valor do tipo
+    string, cada barra invertida é escapada de novo. Um caminho com espaços,
+    `$` ou `%` (comum em perfis de utilizador) deixava de funcionar com o
+    simples envolver em aspas.
+    """
+    part = part.replace("%", "%%")
+    if any(char in _DESKTOP_RESERVED for char in part):
+        part = '"' + re.sub(r'(["`$\\])', r"\\\1", part) + '"'
+    return part.replace("\\", "\\\\")
+
+
 def desktop_entry(command: list[str]) -> str:
     """Produz o conteúdo do ficheiro `.desktop` para Linux.
 
@@ -103,7 +129,7 @@ def desktop_entry(command: list[str]) -> str:
         aplicações (`NoDisplay`), por ser um handler e não um programa.
 
     """
-    exec_line = " ".join(_quote(part) for part in command)
+    exec_line = " ".join(_desktop_arg(part) for part in command)
     return (
         "[Desktop Entry]\n"
         f"Name={FRIENDLY_NAME}\n"
@@ -141,54 +167,53 @@ def windows_registry_values(command: list[str]) -> list[tuple[str, str, str]]:
     ]
 
 
-def info_plist() -> str:
-    """Produz o `Info.plist` do pacote `.app` para macOS.
+def applescript_source(command: list[str]) -> str:
+    """Produz o AppleScript do applet que recebe o URL em macOS.
 
-    `LSUIElement` evita que o handler apareça na Dock ou roube o foco quando o
-    navegador o invoca.
-
-    Returns:
-        O XML do `Info.plist`.
-
-    """
-    return (
-        '<?xml version="1.0" encoding="UTF-8"?>\n'
-        '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
-        '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
-        '<plist version="1.0">\n'
-        "<dict>\n"
-        f"\t<key>CFBundleName</key>\n\t<string>{FRIENDLY_NAME}</string>\n"
-        f"\t<key>CFBundleIdentifier</key>\n\t<string>{BUNDLE_ID}</string>\n"
-        "\t<key>CFBundleExecutable</key>\n\t<string>moodle-token-catcher</string>\n"
-        "\t<key>CFBundleInfoDictionaryVersion</key>\n\t<string>6.0</string>\n"
-        "\t<key>CFBundlePackageType</key>\n\t<string>APPL</string>\n"
-        f"\t<key>CFBundleShortVersionString</key>\n\t<string>{__version__}</string>\n"
-        "\t<key>LSUIElement</key>\n\t<true/>\n"
-        "\t<key>CFBundleURLTypes</key>\n"
-        "\t<array>\n\t\t<dict>\n"
-        f"\t\t\t<key>CFBundleURLName</key>\n\t\t\t<string>{FRIENDLY_NAME}</string>\n"
-        "\t\t\t<key>CFBundleURLSchemes</key>\n"
-        f"\t\t\t<array>\n\t\t\t\t<string>{SCHEME}</string>\n\t\t\t</array>\n"
-        "\t\t</dict>\n\t</array>\n"
-        "</dict>\n</plist>\n"
-    )
-
-
-def app_launcher(command: list[str]) -> str:
-    """Produz o executável de arranque do pacote `.app` para macOS.
-
-    O `.app` precisa de um binário próprio; aqui é um script que reencaminha o
-    URL para o comando real.
+    O macOS não passa o URL de um esquema como argumento de linha de comandos:
+    entrega-o por Apple Event (`GURL`). Um `.app` cujo executável é um script
+    shell recebia `$1` vazio e nunca via o token. Um applet AppleScript trata o
+    evento em `on open location` e reencaminha o URL para o comando real.
 
     Args:
         command: O comando de `catcher_command()`.
 
     Returns:
-        O texto do script.
+        O código-fonte a compilar com `osacompile`.
 
     """
-    exec_line = " ".join(_quote(part) for part in command)
-    return f'#!/bin/sh\nexec {exec_line} "$1"\n'
+    shell = " ".join(shlex.quote(part) for part in command)
+    literal = shell.replace("\\", "\\\\").replace('"', '\\"')
+    return (
+        "on open location theURL\n"
+        f'\tdo shell script "{literal} " & quoted form of theURL & " > /dev/null 2>&1 &"\n'
+        "end open location\n"
+    )
+
+
+def macos_plist_entries() -> dict[str, Any]:
+    """Chaves acrescentadas ao `Info.plist` do applet.
+
+    `CFBundleURLTypes` declara o esquema; `LSUIElement` evita que o handler
+    apareça na Dock ou roube o foco quando o navegador o invoca.
+    """
+    return {
+        "CFBundleName": FRIENDLY_NAME,
+        "CFBundleIdentifier": BUNDLE_ID,
+        "CFBundleShortVersionString": __version__,
+        "LSUIElement": True,
+        "CFBundleURLTypes": [{"CFBundleURLName": FRIENDLY_NAME, "CFBundleURLSchemes": [SCHEME]}],
+    }
+
+
+def is_ephemeral(path: str) -> bool:
+    """Diz se um executável vive numa cache que pode ser apagada (p.ex. `uvx`).
+
+    Registar o handler a partir daí funciona até a cache ser limpa, e depois
+    falha sem aviso.
+    """
+    normalized = path.replace("\\", "/").lower()
+    return "archive-v0" in normalized or "/uv/cache/" in normalized or "/caches/uv/" in normalized
 
 
 # ==============================================================================
@@ -233,7 +258,8 @@ def _install_linux(command: list[str]) -> dict[str, object]:
 
 
 def _install_windows(command: list[str]) -> dict[str, object]:
-    import winreg  # Só existe em Windows.
+    # Só existe em Windows; importado dinamicamente para o mypy não o verificar noutros sistemas.
+    winreg: Any = importlib.import_module("winreg")
 
     steps: list[str] = []
     for subkey, name, value in windows_registry_values(command):
@@ -244,25 +270,36 @@ def _install_windows(command: list[str]) -> dict[str, object]:
 
 
 def _install_macos(command: list[str]) -> dict[str, object]:
+    osacompile = shutil.which("osacompile")
+    if not osacompile:
+        raise HandlerError("osacompile não encontrado; é preciso para criar o applet em macOS.")
     bundle = app_bundle_path()
-    macos_dir = bundle / "Contents" / "MacOS"
-    macos_dir.mkdir(parents=True, exist_ok=True)
+    bundle.parent.mkdir(parents=True, exist_ok=True)
+    if bundle.exists():
+        shutil.rmtree(bundle)
 
-    (bundle / "Contents" / "Info.plist").write_text(info_plist(), encoding="utf-8")
-    launcher = macos_dir / "moodle-token-catcher"
-    launcher.write_text(app_launcher(command), encoding="utf-8")
-    launcher.chmod(0o755)
+    with tempfile.TemporaryDirectory() as tmp:
+        source = Path(tmp) / "catcher.applescript"
+        source.write_text(applescript_source(command), encoding="utf-8")
+        result = subprocess.run([osacompile, "-o", str(bundle), str(source)], capture_output=True, text=True)
+    if result.returncode != 0:
+        raise HandlerError(f"osacompile falhou: {result.stderr.strip()}")
 
-    steps = [f"escrito {bundle}"]
+    plist_path = bundle / "Contents" / "Info.plist"
+    with plist_path.open("rb") as handle:
+        info = plistlib.load(handle)
+    info.update(macos_plist_entries())
+    with plist_path.open("wb") as handle:
+        plistlib.dump(info, handle)
+
+    steps = [f"applet criado em {bundle}"]
     lsregister = (
         "/System/Library/Frameworks/CoreServices.framework/Frameworks/"
         "LaunchServices.framework/Support/lsregister"
     )
     if Path(lsregister).exists():
-        result = subprocess.run([lsregister, "-f", str(bundle)], capture_output=True, text=True)
-        steps.append(
-            "lsregister ok" if result.returncode == 0 else f"lsregister falhou: {result.stderr.strip()}"
-        )
+        reg = subprocess.run([lsregister, "-f", str(bundle)], capture_output=True, text=True)
+        steps.append("lsregister ok" if reg.returncode == 0 else f"lsregister falhou: {reg.stderr.strip()}")
     else:
         steps.append("lsregister não encontrado; abre o .app uma vez para o registar")
     return {"path": str(bundle), "steps": steps}
@@ -292,6 +329,14 @@ def install() -> dict[str, object]:
             "Registra manualmente um handler para o esquema "
             f"'{SCHEME}://' que invoque: {' '.join(command)} <url>"
         )
+    if is_ephemeral(command[0]):
+        steps = result.setdefault("steps", [])
+        if isinstance(steps, list):
+            steps.append(
+                "AVISO: o comando está numa cache temporária (uvx) e deixa de existir quando a cache "
+                "for limpa. Instala de forma permanente (`uv tool install` ou `pipx install`) e volta "
+                "a correr --install-handler."
+            )
     result["platform"] = platform.platform()
     result["command"] = " ".join(command)
     return result

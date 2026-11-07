@@ -41,10 +41,11 @@ import json
 import logging
 import os
 import re
-import stat
 import sys
+import tempfile
 import tomllib
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -62,6 +63,12 @@ SETTINGS: dict[str, tuple[str, str]] = {
     # Quando é pedida confirmação ao utilizador antes de agir no Moodle:
     # always | untrusted | client (ver `server._require_confirmation`).
     "confirm_writes": ("MOODLE_MCP_CONFIRM_WRITES", "always"),
+    # Tamanho máximo de um ficheiro descarregado, em MB.
+    "max_download_mb": ("MOODLE_MCP_MAX_DOWNLOAD_MB", "500"),
+    # Subpasta do Vault para o painel e "Unidades Curriculares" (vazio = raiz).
+    "sync_subdir": ("MOODLE_MCP_SYNC_SUBDIR", ""),
+    # Nome da nota do painel (sem .md); com várias instâncias ganha " (<instância>)".
+    "dashboard_name": ("MOODLE_MCP_DASHBOARD_NAME", "Doutoramento - Painel Moodle"),
 }
 
 #: Opções secretas, guardadas em `credentials.json` em vez de `config.toml`.
@@ -86,7 +93,46 @@ def config_dir() -> Path:
     """
     override = os.getenv("MOODLE_MCP_CONFIG_DIR", "").strip()
     path = Path(override).expanduser() if override else Path(user_config_dir(APP_NAME))
-    path.mkdir(parents=True, exist_ok=True)
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return path
+
+
+def atomic_write(path: Path, text: str, mode: int) -> None:
+    """Escreve um ficheiro de forma atómica e já com as permissões finais.
+
+    O conteúdo vai para um temporário no mesmo diretório, criado logo com
+    `mode` (não há um instante em que o ficheiro exista com 0644), é sincronizado
+    para o disco e só então substitui o original com `os.replace`, que é atómico
+    em POSIX e em Windows. Um crash a meio deixa o ficheiro antigo intacto, em
+    vez de um JSON truncado que equivaleria a perder todos os tokens.
+
+    Args:
+        path: Destino.
+        text: Conteúdo.
+        mode: Permissões POSIX do ficheiro (ignoradas em Windows).
+
+    """
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        if sys.platform != "win32":
+            os.fchmod(fd, mode)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
+def write_private(path: Path, text: str) -> Path:
+    """Escreve um ficheiro só legível pelo dono (0600), de forma atómica.
+
+    Para tudo o que possa conter segredos ou dados pessoais: credenciais e
+    registos de autenticação.
+    """
+    atomic_write(path, text, 0o600)
     return path
 
 
@@ -128,6 +174,28 @@ def _read_credentials_raw() -> dict[str, Any]:
         logger.warning("Ignorado %s por não ser legível: %s", path, exc)
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def _credentials_for_update() -> dict[str, Any]:
+    """Lê o `credentials.json` para o reescrever, sem perder um ficheiro ilegível.
+
+    Ler um ficheiro corrompido como `{}` e gravar por cima apagaria os tokens
+    das outras instâncias sem aviso. Em vez disso, o ficheiro ilegível é
+    guardado ao lado com um sufixo de data, e a escrita parte do vazio.
+    """
+    path = credentials_file()
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            return data
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        pass
+    backup = path.with_name(f"{path.name}.corrompido-{datetime.now():%Y%m%d-%H%M%S}")
+    path.replace(backup)
+    logger.warning("%s estava ilegível; guardado em %s antes de o reescrever.", path, backup)
+    return {}
 
 
 def _read_credentials() -> dict[str, str]:
@@ -214,7 +282,7 @@ def save_secret(key: str, value: str) -> Path:
     if key not in SECRETS:
         raise KeyError(f"'{key}' não é uma opção secreta. Secretas: {', '.join(SECRETS)}")
 
-    data = _read_credentials()
+    data = _credentials_for_update()
     # Traz consigo o que ainda estiver só no .env legado, para que a migração
     # não deixe metade dos tokens atrás.
     legacy = _read_legacy_env()
@@ -222,11 +290,7 @@ def save_secret(key: str, value: str) -> Path:
         if secret_key not in data and legacy.get(env_name, "").strip():
             data[secret_key] = legacy[env_name].strip()
     data[key] = value
-
-    path = credentials_file()
-    path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    _restrict_permissions(path)
-    return path
+    return write_private(credentials_file(), json.dumps(data, indent=2, ensure_ascii=False) + "\n")
 
 
 def save_setting(key: str, value: str) -> Path:
@@ -291,7 +355,7 @@ def _write_toml(settings: dict[str, str], instance_urls: dict[str, str]) -> Path
             lines += ["", f"[instances.{name}]", f'url = "{_toml_escape(url)}"']
 
     path = config_file()
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    atomic_write(path, "\n".join(lines) + "\n", 0o644)
     return path
 
 
@@ -350,8 +414,11 @@ def _instances_from_env(source: dict[str, str]) -> dict[str, dict[str, str]]:
 def instances() -> dict[str, Instance]:
     """Devolve todas as instâncias configuradas, por nome.
 
-    Combina, por ordem crescente de precedência, o `config.toml`, o
-    `credentials.json`, o `.env` legado e as variáveis de ambiente. Um
+    Combina, por ordem crescente de precedência, o `config.toml`, o `.env`
+    legado, o `credentials.json` e as variáveis de ambiente. O `credentials.json`
+    fica acima do `.env` porque é onde o login (handler ou `set_moodle_token`)
+    grava o token novo: com a ordem inversa, um token antigo esquecido no `.env`
+    continuaria a ser usado depois de um novo login, sem aviso. Um
     `MOODLE_URL` ou `MOODLE_TOKEN` sem nome é atribuído à instância
     predefinida, o que mantém as instalações anteriores a funcionar.
 
@@ -367,8 +434,8 @@ def instances() -> dict[str, Instance]:
             slot.update({k: v for k, v in body.items() if v})
 
     absorb(_instances_from_toml())
-    absorb({name: {"token": tok} for name, tok in _instance_tokens_from_credentials().items() if tok})
     absorb(_instances_from_env(_read_legacy_env()))
+    absorb({name: {"token": tok} for name, tok in _instance_tokens_from_credentials().items() if tok})
     absorb(_instances_from_env(dict(os.environ)))
 
     # `MOODLE_URL` / `MOODLE_TOKEN` sem nome formam a sua própria instância, e
@@ -472,16 +539,15 @@ def save_instance_token(name: str, token: str) -> Path:
         O caminho do ficheiro escrito.
 
     """
-    data = _read_credentials_raw()
+    data = _credentials_for_update()
     bucket = data.setdefault("instances", {})
     if not isinstance(bucket, dict):
         bucket = data["instances"] = {}
-    bucket.setdefault(name.strip().lower(), {})["token"] = token
-
-    path = credentials_file()
-    path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    _restrict_permissions(path)
-    return path
+    slot = bucket.setdefault(name.strip().lower(), {})
+    if not isinstance(slot, dict):
+        slot = bucket[name.strip().lower()] = {}
+    slot["token"] = token
+    return write_private(credentials_file(), json.dumps(data, indent=2, ensure_ascii=False) + "\n")
 
 
 def save_instance_url(name: str, url: str) -> Path:
@@ -505,22 +571,6 @@ def save_instance_url(name: str, url: str) -> Path:
         {k: str(v) for k, v in toml.items() if k in SETTINGS},
         existing,
     )
-
-
-def _restrict_permissions(path: Path) -> None:
-    """Restringe o ficheiro ao proprietário, onde o sistema o suporte.
-
-    Em POSIX aplica 0600. No Windows o `chmod` não tem este efeito, pelo que a
-    proteção fica a cargo das ACL do perfil do utilizador — ficam registadas em
-    DEBUG para não dar a ideia de uma garantia que não existe.
-    """
-    if sys.platform == "win32":
-        logger.debug("Em Windows, %s fica protegido pelas ACL do perfil.", path)
-        return
-    try:
-        path.chmod(stat.S_IRUSR | stat.S_IWUSR)
-    except OSError as exc:  # pragma: no cover
-        logger.warning("Não foi possível restringir as permissões de %s: %s", path, exc)
 
 
 def _exists(path: Path) -> str:
@@ -552,4 +602,31 @@ def describe() -> dict[str, str]:
     for name, inst in found.items():
         token_state = "token definido" if inst.token else "SEM TOKEN"
         summary[f"instance[{name}]"] = f"{inst.url or '(sem url)'} — {token_state}"
+    for index, warning in enumerate(security_warnings(), start=1):
+        summary[f"AVISO {index}"] = warning
     return summary
+
+
+def security_warnings() -> list[str]:
+    """Problemas de configuração que expõem segredos, em linguagem acionável.
+
+    Returns:
+        Uma frase por problema; lista vazia se estiver tudo bem.
+
+    """
+    warnings: list[str] = []
+    if sys.platform != "win32":
+        for path in (credentials_file(), legacy_env_file(), config_dir() / "last_auth.log"):
+            try:
+                mode = path.stat().st_mode
+            except OSError:
+                continue
+            if mode & 0o077:
+                warnings.append(f"{path} é legível por outros utilizadores: chmod 600 '{path}'")
+    legacy_tokens = sorted(k for k, v in _read_legacy_env().items() if k.endswith("TOKEN") and v.strip())
+    if legacy_tokens:
+        warnings.append(
+            f"{legacy_env_file()} ainda tem {', '.join(legacy_tokens)}: o credentials.json tem precedência, "
+            "pelo que pode ser um token antigo. Apaga a linha depois de confirmares o login."
+        )
+    return warnings

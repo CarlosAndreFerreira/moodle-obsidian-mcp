@@ -126,7 +126,9 @@ def test_every_vault_note_goes_through_write_note(tmp_path):
     content = note.read_text(encoding="utf-8")
     assert "`$=" not in content and "```dataviewjs" not in content
     source = (server.__file__ and open(server.__file__, encoding="utf-8").read()) or ""
-    assert source.count(".write_text(") == 1  # só dentro de _write_note
+    # Todas as notas passam por _write_note, o único sítio que escreve texto no Vault.
+    assert source.count(".write_text(") == 0
+    assert source.count("config.atomic_write(") == 1
 
 
 # ------------------------------------------------------------------------------
