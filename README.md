@@ -1,88 +1,89 @@
-# 🎓 Moodle-Obsidian Doctoral MCP & SSO Auto-Token Suite
+# moodle-mcp
 
-Servidor **Model Context Protocol (MCP)** em Python (`FastMCP`) desenhado para estudantes de Doutoramento / Ensino Superior em plataformas **Moodle** com **Single Sign-On (SSO)** federado (como a **Universidade Aberta — `elearning.uab.pt`** com credenciais **UTAD / RCTSaai** e **`e-learning.utad.pt`**), integrado diretamente com o **Obsidian**.
+[![CI](https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp/actions/workflows/ci.yml)
+![Python](https://img.shields.io/badge/python-3.11%2B-blue)
+![License](https://img.shields.io/badge/license-MIT-green)
+![MCP](https://img.shields.io/badge/MCP-server-purple)
 
----
+A **Model Context Protocol** server that gives AI assistants (Claude, opencode, any MCP client) safe access to **Moodle**, and syncs your courses, grades, deadlines and materials into an **Obsidian** vault.
 
-## ✨ Funcionalidades Principais
+Works with any Moodle that has Web Services and the mobile app service enabled — **including universities behind federated SSO** (Entra ID, SAML, Shibboleth, CAS), where students can't generate an API token by hand.
 
-1. **Auto-Descoberta de Token Mobile via Browser (`moodlemobile://`):**
-   * Mesmo quando a universidade usa SSO federado (Microsoft Entra ID / SAML / Shibboleth / CAS) e oculta a página `/user/managetoken.php` aos estudantes, o capturador nativo (`capture_mobile_token.py` registado via `xdg-mime`) interceta o redirecionamento `moodlemobile://token=...` diretamente do navegador (Brave, Firefox, Chrome), descodifica o Base64, guarda o `wstoken` em `.env` e sincroniza o cofre do Obsidian automaticamente.
-2. **Sincronização Completa para o Obsidian (`sync_doctoral_dashboard_to_obsidian`):**
-   * Gera um painel central (`Doutoramento - Painel Moodle.md`) com tabela de Unidades Curriculares, progresso, notas atuais e calendário ordenado de prazos de *e-fólios* / trabalhos.
-   * Cria uma nota individual por cada Unidade Curricular (`Unidades Curriculares/<Nome da UC>.md`) com grelha de avaliação (`gradereport`), estado de submissão de cada *e-fólio* (`mod_assign`), enunciados convertidos para Markdown e árvore de recursos.
-3. **Download de Materiais + Extração de PDFs para Markdown (`PyMuPDF`):**
-   * `download_all_course_materials_to_obsidian`: Descarrega automaticamente todos os PDFs, slides, enunciados anexos e páginas HTML de uma cadeira para `Unidades Curriculares/<UC>/Materiais/` e converte cada PDF num ficheiro `.pdf.md` pesquisável no Obsidian e legível por agentes de IA.
-4. **32 Ferramentas MCP para Estudantes (Leitura + Escrita):**
-   * **Cursos, Livros e Progresso:** `get_enrolled_courses`, `get_course_contents`, `get_course_pages_and_books` (`mod_book`, `mod_page`, `mod_folder`, `mod_resource`), `get_activities_completion_status`, `toggle_activity_completion`, `get_course_participants`.
-   * **Notas, Trabalhos e Submissões:** `get_course_grades`, `get_all_grades_overview`, `get_assignments`, `get_assignment_submission`, `get_course_quizzes`, `upload_file_to_draft`, `save_assignment_submission`, `add_submission_comment`.
-   * **Fóruns Assíncronos e Mensagens:** `get_course_forums`, `get_forum_discussions`, `get_discussion_posts`, `search_all_course_forums`, `export_forum_discussions_to_obsidian`, `reply_to_forum_post`, `create_forum_discussion`, `send_instant_message`, `get_messages`, `get_calendar_events`.
-   * **Suporte Multi-Instância:** Parâmetro `instance="uab"` ou `instance="utad"` em todas as ferramentas.
+🇵🇹 [Versão em português](README.pt.md)
 
 ---
 
-## 🚀 Instalação
+## Why this one
 
-O pacote tem um entrypoint (`moodle-mcp`), pelo que a mesma linha serve em Linux,
-macOS e Windows e em qualquer cliente MCP.
+Most MCP servers for third-party platforms pipe untrusted content straight into the model and expose every write action by default. Moodle is a worst case for that: any participant in a course can write forum posts the model will read, and actions like submitting an assignment can't be undone. This server is designed around that threat model:
+
+- **Read-only by default.** Write tools (submissions, forum posts, messages) and the raw Web Services API are off unless you enable them explicitly. 17 of the 21 default tools carry `readOnlyHint`, so a client can auto-approve them without auto-approving anything irreversible.
+- **Prompt-injection defenses on the server side** (OWASP LLM01), not delegated to the model:
+  - hidden content is stripped from every Moodle response — `display:none`, `font-size:0`, `hidden`, HTML comments, Unicode tag characters, zero-width and bidi control characters — so the model reads what the student sees;
+  - notes written to the vault can't execute anything: `dataviewjs`/`dataview` blocks, inline Dataview and Templater commands are neutralised, remote images become links (no tracking pixels);
+  - every Moodle write requires **user confirmation via MCP elicitation**, showing the exact recipient and text — even when the client is set to auto-approve.
+- **Token confinement.** Credentials never appear in tool responses. The token is only ever attached to `pluginfile.php` URLs on the configured instance; any other host is refused before a request is made. Tools that can overwrite credentials are off by default, so a malicious forum post can't swap your token.
+- **Context-budget aware.** The full tool set costs ~8,900 tokens per request; selectable toolsets cut that to ~1,600–4,950.
+
+## Features
+
+- **SSO token capture** — a `moodlemobile://` URL handler intercepts the mobile-app login redirect from your browser, decodes the token and stores it (`0600`). Registered natively on Linux (`xdg-mime`), Windows (`HKEY_CURRENT_USER`, no admin) and macOS (Launch Services). The token never passes through the model.
+- **Obsidian dashboard sync** — a central note with every course, progress, current grades and a sorted deadline calendar; one note per course with grade report, per-assignment submission status, assignment briefs converted to Markdown and the resource tree.
+- **Course material download** — PDFs, slides and HTML pages saved into the vault, with each PDF converted to a searchable `.pdf.md` that agents can read (optional `[pdf]` extra).
+- **32 tools** across courses, books and pages, completion, grades, assignments and submissions, quizzes, forums (search, export to Obsidian, reply), messages and calendar.
+- **Multi-instance** — an open registry of Moodle instances; when more than one is configured, the `instance` parameter is exposed as an **enum in the schema**, so the model gets the valid names instead of free text.
+
+## Install
 
 ```bash
 uvx --from git+https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp moodle-mcp --show-config
 ```
 
-Ou a partir de um clone:
+or from a clone:
 
 ```bash
-git clone git@github.com:CarlosAndreFerreira/moodle-obsidian-mcp.git
+git clone https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp.git
 cd moodle-obsidian-mcp
 uv pip install -e ".[pdf]"
 ```
 
-O extra `[pdf]` acrescenta a extração de texto de PDFs via PyMuPDF. Fica de fora
-da instalação base porque o PyMuPDF é AGPL-3.0: sem ele, tudo o resto funciona e
-os downloads de PDF apenas não geram o `.md` acompanhante.
+The `[pdf]` extra adds PDF text extraction via PyMuPDF. It's kept out of the base install because PyMuPDF is **AGPL-3.0**; without it everything works, PDF downloads just don't get the companion `.md`.
 
-Para registar o handler `moodlemobile://`, que é o que permite capturar o token
-a partir do navegador quando a universidade usa SSO federado:
+Register the `moodlemobile://` handler (needed for SSO login):
 
 ```bash
-moodle-mcp --install-handler     # Linux, macOS e Windows
+moodle-mcp --install-handler
 moodle-mcp --uninstall-handler
 ```
 
-O mecanismo difere por sistema e o comando escolhe o certo: um ficheiro
-`.desktop` com `xdg-mime` em Linux, chaves em `HKEY_CURRENT_USER` em Windows
-(sem precisar de administrador), e um pacote `.app` com `CFBundleURLTypes`
-registado no Launch Services em macOS. Não precisa de privilégios elevados em
-nenhum deles.
+## Reliability
 
-### Configuração
+- **One failing course doesn't stop a sync.** Each course syncs independently; a section Moodle refuses (quizzes, choices, grades) is left empty and reported in `errors` with `status: "partial"`. Only a missing or invalid token stops everything, with instructions to log in again.
+- **Moodle errors arrive as errors** (`isError` in MCP), with the cause and what to do, instead of being disguised as results.
+- **Nothing is overwritten by accident:** files, pages, forums and courses with the same name get ` (2)`, ` (3)`…; filenames are valid on Windows, macOS and Linux.
+- **Transient failures are retried:** reads back off on 429/5xx and connection errors (honouring `Retry-After`); writes are never retried once the server has received them, so nothing gets posted twice. Connections are reused (keep-alive).
+- **The server doesn't block:** sync, material download and forum export run in a thread and report per-course progress to the client.
+- **Vault layout:** `MOODLE_MCP_SYNC_SUBDIR` puts the dashboard and course notes in a subfolder (links follow); `MOODLE_MCP_DASHBOARD_NAME` renames the dashboard. With several instances, each gets its own dashboard.
+- **Atomic, bounded downloads:** a failed download leaves the previous file intact, and no file exceeds `MOODLE_MCP_MAX_DOWNLOAD_MB` (500).
+- **Secrets:** `credentials.json` and `last_auth.log` are written atomically and already `0600`; an unreadable `credentials.json` is set aside rather than deleted; `moodle-mcp --show-config` (and startup) warn about files readable by other users.
 
-Nada é obrigatório: há omissões para tudo. A configuração é lida por camadas, da
-maior precedência para a menor:
+## Configuration
 
-1. **Variáveis de ambiente** — é por aqui que os clientes MCP injetam opções
-   (`env` no Claude Code, `environment` no opencode).
-2. **`config.toml`** no diretório de configuração do utilizador.
-3. **`credentials.json`** no mesmo diretório — só tokens, com permissões `0600`.
-4. **`.env`** ao lado do código — legado, ainda lido.
+Nothing is required — every option has a default. Configuration is layered, highest precedence first:
 
-O diretório é o do sistema operativo: `~/.config/moodle-mcp` (Linux),
-`~/Library/Application Support/moodle-mcp` (macOS),
-`%LOCALAPPDATA%\moodle-mcp` (Windows). Não fica junto ao código porque, instalado
-com `uvx` ou `pipx`, o pacote corre de uma cache efémera e possivelmente só de
-leitura.
+1. **Environment variables** — how MCP clients inject options (`env` in Claude, `environment` in opencode).
+2. **`config.toml`** in the user config directory.
+3. **`credentials.json`** in the same directory — tokens only, `0600`.
+4. **`.env`** next to the code — legacy, still read.
+
+The config directory follows the OS: `~/.config/moodle-mcp` (Linux), `~/Library/Application Support/moodle-mcp` (macOS), `%LOCALAPPDATA%\moodle-mcp` (Windows). It doesn't live next to the code because under `uvx`/`pipx` the package runs from an ephemeral, possibly read-only cache.
 
 ```bash
-moodle-mcp --show-config      # onde tudo é lido, sem revelar segredos
-moodle-mcp --list-toolsets    # que ferramentas cada toolset expõe
+moodle-mcp --show-config      # where everything is read from, secrets redacted
+moodle-mcp --list-toolsets    # which tools each toolset exposes
 ```
 
-### Instâncias Moodle
-
-As instâncias são um registo aberto, não uma lista fixa: serve qualquer
-universidade que corra Moodle com os Web Services e o serviço da app móvel
-ativos. Declaram-se em `config.toml`:
+### Moodle instances
 
 ```toml
 default_instance = "uab"
@@ -94,143 +95,51 @@ url = "https://elearning.uab.pt"
 url = "https://e-learning.utad.pt"
 ```
 
-ou por ambiente, com `MOODLE_<NOME>_URL` e `MOODLE_<NOME>_TOKEN`:
+or via environment: `MOODLE_<NAME>_URL` and `MOODLE_<NAME>_TOKEN`.
 
-```json
-{
-  "env": {
-    "MOODLE_UAB_URL": "https://elearning.uab.pt",
-    "MOODLE_UTAD_URL": "https://e-learning.utad.pt",
-    "MOODLE_DEFAULT_INSTANCE": "uab"
-  }
-}
-```
-
-Os tokens vão para `credentials.json` sob `instances.<nome>.token`, gravados pelo
-`set_moodle_token` ou pelo capturador `moodlemobile://`. Cada ferramenta aceita
-`instance="<nome>"` e, quando há mais do que uma configurada, o nome aparece como
-**enum na schema** — o cliente e o modelo recebem os nomes válidos desta
-instalação em vez de texto livre.
-
-`MOODLE_URL` e `MOODLE_TOKEN` sem nome continuam a funcionar e formam a instância
-predefinida, mas só enquanto não houver nenhuma instância nomeada: atribuí-los a
-uma instância nomeada faria o token de uma universidade ser enviado para o
-servidor de outra.
+Unnamed `MOODLE_URL` / `MOODLE_TOKEN` still work as the default instance, but only while no named instance exists — otherwise one university's token could be sent to another's server.
 
 ### Toolsets
 
-As 32 ferramentas custam ~8 900 tokens de contexto em cada pedido. Expor só o
-que usas corta isso para menos de metade:
-
-| `--tools` | Tools | ~tokens | Escrita no Moodle |
+| `--tools` | Tools | ~tokens | Writes to Moodle |
 |:---|--:|--:|:---|
-| **(omissão)** | **21** | **~4 950** | **não** |
-| `core,grades,forums,obsidian,write` | 28 | ~7 250 | sim |
-| `all` | 32 | ~8 900 | sim, mais a API livre |
-| `core,obsidian` | 12 | ~3 200 | não |
-| `core` | 8 | ~1 600 | não |
+| **(default)** | **21** | **~4,950** | **no** |
+| `core,grades,forums,obsidian,write` | 28 | ~7,250 | yes |
+| `all` | 32 | ~8,900 | yes, plus the raw API |
+| `core,obsidian` | 12 | ~3,200 | no |
+| `core` | 8 | ~1,600 | no |
 
-`core` é sempre incluído.
+`core` is always included. `write` and `raw` log a warning at startup. `auth` (tools that store credentials) is off by default; even when on, `set_moodle_token` validates the token, accepts only `https://` URLs and won't change an existing instance's URL.
 
-**As ferramentas que gravam credenciais (`auth`) também não vêm ligadas.**
-`set_moodle_token`, `decode_mobile_launch_token` e
-`extract_token_from_session_cookie` permitiriam que um post de fórum com
-instruções escondidas trocasse o token guardado. O login faz-se pelo handler
-`moodlemobile://` (ver abaixo), que não passa pelo modelo; quem preferir colar o
-token no chat ativa-as com `--tools ...,auth`. Mesmo assim, `set_moodle_token`
-valida o token antes de o gravar, só aceita URLs `https://` e não muda o URL de
-uma instância já configurada.
+### Write confirmation
 
-Os downloads só juntam o token a ficheiros (`pluginfile.php`) da instância
-configurada: um URL de outro anfitrião é recusado antes de qualquer pedido.
+`MOODLE_MCP_CONFIRM_WRITES`:
 
-**As ferramentas que escrevem no Moodle não vêm ligadas.** Submeter um trabalho,
-publicar num fórum avaliado ou enviar uma mensagem age em nome do estudante do
-lado da universidade, e nenhuma dessas ações se desfaz. Por omissão o servidor
-lê do Moodle e escreve apenas no Vault local; para as activar é preciso
-`--tools ...,write`, e o servidor registra um aviso no arranque quando estão
-ligadas. O mesmo vale para `raw`, que expõe a API de Web Services por inteiro.
-
-Das 21 ferramentas da omissão, 17 estão marcadas como `readOnlyHint`, pelo que
-um cliente as pode auto-aprovar sem auto-aprovar nada irreversível.
-
-### Fiabilidade
-
-* **A sincronização não pára por causa de uma UC.** Cada disciplina é
-  sincronizada à parte; uma secção que o Moodle recuse (testes, escolhas, notas)
-  fica vazia e o problema aparece em `errors`, com `status: "parcial"`. Só um
-  token inválido ou em falta pára tudo, com instruções para voltar a fazer login.
-* **Erros do Moodle chegam como erros** (`isError` no MCP), com a causa e o que
-  fazer, em vez de virem disfarçados de resultado.
-* **Nada se sobrescreve por acidente:** ficheiros, páginas, fóruns e UCs com o
-  mesmo nome ganham ` (2)`, ` (3)`…; as páginas do Moodle (`index.html`) ficam com
-  o nome do módulo. Os nomes são válidos em Windows, macOS e Linux.
-* **Falhas transitórias não param nada:** as leituras repetem com backoff em
-  429/5xx e falhas de ligação (respeitando `Retry-After`); as escritas nunca
-  repetem depois de o servidor as ter recebido, para não publicar duas vezes.
-  As ligações são reutilizadas (keep-alive).
-* **O servidor não bloqueia:** sincronização, download de materiais e exportação
-  de fóruns correm numa thread e reportam progresso por UC ao cliente.
-* **Organização do Vault:** `MOODLE_MCP_SYNC_SUBDIR` põe o painel e
-  `Unidades Curriculares/` numa subpasta (as ligações acompanham), e
-  `MOODLE_MCP_DASHBOARD_NAME` muda o nome do painel. Com várias instâncias, cada
-  uma tem o seu painel (`<nome> (<instância>)`).
-* **Downloads atómicos e com limite:** um download que falhe deixa o ficheiro
-  anterior intacto, e nenhum ficheiro passa de `MOODLE_MCP_MAX_DOWNLOAD_MB` (500).
-* **Segredos:** `credentials.json` e `last_auth.log` são escritos de forma
-  atómica e já com `0600`; um `credentials.json` ilegível é guardado à parte em
-  vez de ser apagado; o token gravado pelo login tem precedência sobre um token
-  antigo no `.env`. `moodle-mcp --show-config` (e o arranque) avisam de ficheiros
-  legíveis por outros utilizadores.
-
-### Proteção contra prompt injection
-
-Posts de fórum, páginas e descrições são escritos por qualquer participante da
-disciplina e chegam ao modelo. Nenhum modelo resiste de forma fiável a instruções
-escondidas nesse conteúdo (OWASP LLM01), por isso as defesas são do lado do
-servidor e não dependem do modelo:
-
-* **Conteúdo invisível é retirado** de todas as respostas do Moodle: texto em
-  elementos escondidos (`display:none`, `font-size:0`, `hidden`, comentários) e
-  caracteres invisíveis (bloco Unicode «tags», largura zero, controlos
-  bidirecionais). O modelo passa a ler o mesmo que o estudante vê.
-* **As notas escritas no Vault não executam nada:** blocos `dataviewjs`/`dataview`,
-  expressões inline do Dataview e comandos do Templater ficam desativados, e
-  imagens remotas passam a links (não carregam sozinhas, logo não rastreiam).
-* **Cada ação no Moodle pede confirmação ao utilizador**, pelo servidor
-  (elicitation do MCP), com o destinatário e o texto exatos — também quando o
-  cliente está configurado para aprovar tudo. Recusar, ou um cliente sem
-  elicitation, bloqueia a ação.
-
-O comportamento da confirmação escolhe-se com `MOODLE_MCP_CONFIRM_WRITES`:
-
-| Valor | Quando pede confirmação |
+| Value | When confirmation is requested |
 |:---|:---|
-| `always` (omissão) | antes de qualquer ação no Moodle |
-| `untrusted` | só depois de a sessão ter lido conteúdo de terceiros (posts, páginas, mensagens) |
-| `client` | nunca; depende só da aprovação do cliente MCP (para clientes sem elicitation — não recomendado) |
+| `always` (default) | before any Moodle action |
+| `untrusted` | only after the session has read third-party content (posts, pages, messages) |
+| `client` | never; relies on the MCP client's approval alone (for clients without elicitation — not recommended) |
 
-Limites: um cliente que responda sozinho aos pedidos de confirmação anula a
-última defesa, e texto malicioso visível continua a chegar ao modelo. Por isso as
-ferramentas de escrita continuam desligadas por omissão.
+**Limits:** a client that answers confirmation prompts automatically defeats the last line of defense, and visible malicious text still reaches the model. That's why write tools stay off by default.
 
-### Configuração nos clientes
+## Client setup
 
 **Claude Code / Claude Desktop** (`mcpServers`):
 
 ```json
 {
   "mcpServers": {
-    "moodle-uab": {
+    "moodle": {
       "command": "moodle-mcp",
       "args": ["--tools", "core,obsidian"],
-      "env": { "MOODLE_URL": "https://elearning.uab.pt" }
+      "env": { "MOODLE_URL": "https://your-moodle.example.edu" }
     }
   }
 }
 ```
 
-**opencode** (`opencode.json`; chave `mcp`, `command` como array, `environment`):
+**opencode** (`opencode.json`):
 
 ```json
 {
@@ -238,38 +147,38 @@ ferramentas de escrita continuam desligadas por omissão.
     "moodle": {
       "type": "local",
       "command": ["moodle-mcp", "--tools", "core,obsidian"],
-      "environment": { "MOODLE_URL": "https://elearning.uab.pt" },
+      "environment": { "MOODLE_URL": "https://your-moodle.example.edu" },
       "enabled": true
     }
   }
 }
 ```
 
-### Autenticação via Browser (1 clique)
-1. Faz login normalmente no Moodle da tua universidade no navegador.
-2. Corre:
+## Browser login (SSO)
+
+1. Log in to your university's Moodle in the browser as usual.
+2. Run:
    ```bash
-   moodle-mcp --login            # ou: moodle-mcp --login utad
+   moodle-mcp --login            # or: moodle-mcp --login utad
    ```
-   O comando abre no navegador um link de login com um *passport* aleatório,
-   de uso único e válido durante 15 minutos (`--no-browser` só o mostra).
-3. Aceita o pop-up **"Abrir Moodle Token Catcher"** — o token é verificado,
-   guardado em `credentials.json` na instância certa e o Vault é sincronizado
-   de imediato. O resultado fica em `last_auth.log`, no diretório de configuração.
+   This opens a login link with a random, single-use *passport* valid for 15 minutes (`--no-browser` just prints it).
+3. Accept the **"Open Moodle Token Catcher"** prompt — the token is verified, stored in `credentials.json` under the right instance and the vault syncs immediately. The outcome is written to `last_auth.log` in the config directory.
 
-O handler só aceita a resposta a um login iniciado assim: o Moodle assina-a
-com `md5(wwwroot . passport)`, e o handler confirma essa assinatura. O link
-antigo com `passport=12345` deixou de funcionar, porque permitia a qualquer
-página web substituir o teu token pelo de outra conta.
+The handler only accepts the response to a login started this way: Moodle signs it with `md5(wwwroot . passport)` and the handler checks that signature. A fixed passport would let any web page replace your token with another account's.
 
----
+> **Note:** this uses the same login flow as the official Moodle mobile app and only grants what your own account can already do. Check your institution's acceptable-use policy before automating access to its platform.
 
-## 📄 Licença
+## Development
 
-MIT — ver [LICENSE](LICENSE). O extra `[pdf]` instala o PyMuPDF, que é
-**AGPL-3.0**: se o usares, essa dependência traz as suas próprias obrigações.
-Sem o extra, o servidor funciona e apenas não gera o `.md` acompanhante dos PDFs.
+```bash
+uv pip install -e ".[dev,pdf]"
+ruff check moodle_mcp tests && ruff format --check moodle_mcp tests
+mypy moodle_mcp
+pytest
+```
 
-## 🔒 Segurança e Privacidade
-* O ficheiro `.gitignore` bloqueia estritamente `.env`, `*.log` e quaisquer ficheiros de credenciais/tokens.
-* O script `capture_mobile_token.py` nunca regista tokens em ficheiros de log.
+The test suite covers token safety (credential confinement, cross-host refusal), prompt-injection sanitisation, resilience and robustness. CI runs lint, mypy and tests on Linux, Windows and macOS (Python 3.11–3.13), plus `pip-audit`.
+
+## License
+
+MIT — see [LICENSE](LICENSE). The optional `[pdf]` extra installs PyMuPDF, which is **AGPL-3.0** and carries its own obligations.
