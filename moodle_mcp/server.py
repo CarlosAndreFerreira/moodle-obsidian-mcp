@@ -18,6 +18,7 @@ Arranque: `moodle-mcp` (ver `main`), `python -m moodle_mcp.server`, ou o shim
 
 import argparse
 import base64
+import binascii
 import hashlib
 import html
 import json
@@ -28,7 +29,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -36,6 +37,7 @@ from markdownify import markdownify as md_convert
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 from pydantic import Field
+from urllib3.util import parse_url
 
 from moodle_mcp import __version__, config, handler
 
@@ -239,13 +241,158 @@ def _resolve_target(instance: str = "") -> tuple[str, str]:
     return target.url, target.token
 
 
+class MoodleRequestError(RuntimeError):
+    """Um pedido HTTP ao Moodle falhou.
+
+    A mensagem tem só o método, o caminho e o código HTTP. O `requests` põe o
+    URL completo, com a query, no texto de `HTTPError` e `ConnectionError`, e o
+    token vai na query dos downloads; como o texto das exceções chega ao modelo
+    (e ao histórico da sessão), nunca pode transportar o URL.
+    """
+
+
+def _request(method: str, url: str, **kwargs: Any) -> requests.Response:
+    """Faz um pedido HTTP e converte qualquer falha numa exceção sem segredos.
+
+    Args:
+        method: Método HTTP.
+        url: URL sem segredos na query (os segredos vão em `params`/`data`).
+        **kwargs: Passados a `requests.request`.
+
+    Returns:
+        A resposta, já com `raise_for_status()` verificado.
+
+    Raises:
+        MoodleRequestError: Em qualquer falha de rede ou código HTTP de erro.
+    """
+    try:
+        response = requests.request(method, url, **kwargs)
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        detail = f"HTTP {status}" if status else type(exc).__name__
+        # `from None`: a exceção original tem o URL com o token no texto.
+        raise MoodleRequestError(f"{method.upper()} {urlparse(url).path} falhou: {detail}") from None
+    return response
+
+
+#: Caminhos de ficheiro do Moodle aos quais o token pode ser acrescentado.
+_FILE_ENDPOINTS = ("/webservice/pluginfile.php/", "/tokenpluginfile.php/", "/pluginfile.php/")
+
+_DEFAULT_PORTS = {"https": 443, "http": 80}
+
+
+def _validate_file_url(file_url: str, base_url: str) -> str:
+    """Garante que um URL de ficheiro pertence à instância Moodle configurada.
+
+    O URL é interpretado depois de preparado pelo `requests`, ou seja, pelo
+    mesmo parser que vai abrir a ligação. Comparar com o `urlparse` não chega:
+    para `https://evil.example\\@moodle/x` o `urlparse` lê o anfitrião
+    `moodle`, mas o `requests` liga-se a `evil.example`.
+
+    Args:
+        file_url: O `fileurl` recebido (da API do Moodle ou do modelo).
+        base_url: URL base da instância.
+
+    Returns:
+        O URL tal como o `requests` o vai enviar.
+
+    Raises:
+        ValueError: Se o esquema, o anfitrião, a porta ou o caminho não forem
+            os de um ficheiro desta instância.
+    """
+    refused = ValueError(
+        "Recusado: o URL não é um ficheiro (pluginfile.php) da instância Moodle configurada "
+        f"({base_url or 'sem URL'}); o token só é enviado para essa instância. Se o Moodle usa "
+        "outro endereço (http/https, www.), corrige o URL da instância na configuração."
+    )
+    try:
+        prepared = requests.Request("GET", file_url.strip()).prepare().url or ""
+        target, base = parse_url(prepared), parse_url(base_url)
+    except (requests.RequestException, ValueError):
+        raise refused from None
+
+    def host(parsed: Any) -> str:
+        return (parsed.host or "").rstrip(".").lower()
+
+    def port(parsed: Any) -> int | None:
+        return parsed.port or _DEFAULT_PORTS.get(parsed.scheme or "")
+
+    if (
+        not host(base)
+        or target.auth
+        or target.scheme != base.scheme
+        or host(target) != host(base)
+        or port(target) != port(base)
+    ):
+        raise refused
+
+    path = target.path or ""
+    if ".." in unquote(path).split("/"):
+        raise refused
+    base_path = (base.path or "").rstrip("/")
+    if not any(path.startswith(base_path + endpoint) for endpoint in _FILE_ENDPOINTS):
+        raise refused
+    return prepared
+
+
+def _authed_get(file_url: str, instance: str, **kwargs: Any) -> requests.Response:
+    """Descarrega um ficheiro autenticado do Moodle — único sítio onde o token vai num URL.
+
+    Valida o URL contra a instância antes de juntar o token, e passa-o em
+    `params` (nunca concatenado). Um redirecionamento não leva o token: o
+    `requests` constrói o pedido seguinte a partir do `Location`.
+
+    Args:
+        file_url: O `fileurl` devolvido pela API do Moodle.
+        instance: Nome da instância.
+        **kwargs: Passados a `requests.request` (`stream`, `timeout`, ...).
+
+    Returns:
+        A resposta HTTP.
+
+    Raises:
+        ValueError: Se o URL não pertencer à instância ou não houver token.
+        MoodleRequestError: Se o pedido falhar.
+    """
+    base_url, token = _resolve_target(instance)
+    if not token:
+        raise ValueError(f"Token para '{instance}' não está configurado.")
+    url = _validate_file_url(file_url, base_url)
+    return _request("GET", url, params={"token": token}, **kwargs)
+
+
+def _ws_call(
+    base_url: str,
+    token: str,
+    wsfunction: str,
+    params: dict[str, Any] | None = None,
+    method: str = "POST",
+) -> Any:
+    """Chama uma função REST do Moodle com um URL e um token explícitos."""
+    payload: dict[str, Any] = {
+        "wstoken": token,
+        "wsfunction": wsfunction,
+        "moodlewsrestformat": "json",
+    }
+    if params:
+        payload.update(params)
+
+    url = f"{base_url}/webservice/rest/server.php"
+    if method.upper() == "GET":
+        response = _request("GET", url, params=payload, timeout=30)
+    else:
+        response = _request("POST", url, data=payload, timeout=30)
+    return _redact_secrets(response.json())
+
+
 def _moodle_call(
     wsfunction: str,
     params: dict[str, Any] | None = None,
     method: str = "POST",
     instance: str = DEFAULT_INSTANCE,
 ) -> Any:
-    """Helper to call Moodle REST Web Services API."""
+    """Chama uma função REST do Moodle na instância indicada."""
     base_url, token = _resolve_target(instance)
     if not token:
         return {
@@ -258,22 +405,7 @@ def _moodle_call(
                 "`moodle-mcp --show-config`."
             ),
         }
-
-    payload: dict[str, Any] = {
-        "wstoken": token,
-        "wsfunction": wsfunction,
-        "moodlewsrestformat": "json",
-    }
-    if params:
-        payload.update(params)
-
-    url = f"{base_url}/webservice/rest/server.php"
-    if method.upper() == "GET":
-        response = requests.get(url, params=payload, timeout=30)
-    else:
-        response = requests.post(url, data=payload, timeout=30)
-    response.raise_for_status()
-    return _redact_secrets(response.json())
+    return _ws_call(base_url, token, wsfunction, params, method)
 
 
 def _get_current_user_id(instance: str = DEFAULT_INSTANCE) -> int:
@@ -301,15 +433,6 @@ def _safe_filename(name: str) -> str:
     return re.sub(r"\s+", " ", cleaned)[:120]
 
 
-def _append_token_to_fileurl(fileurl: str, token: str) -> str:
-    if not fileurl:
-        return ""
-    sep = "&" if "?" in fileurl else "?"
-    if "token=" in fileurl:
-        return fileurl
-    return f"{fileurl}{sep}token={token}"
-
-
 # ==============================================================================
 # 1. AUTENTICAÇÃO, TOKENS & SSO FEDERADO
 # ==============================================================================
@@ -322,39 +445,130 @@ def set_moodle_token(
     ],
     instance: Inst = DEFAULT_INSTANCE,
     moodle_url: Annotated[
-        str, Field(description="URL base alternativo a gravar para esta instância; vazio mantém o atual.")
+        str,
+        Field(
+            description=(
+                "URL base (https://) de uma instância que ainda não tenha URL configurado; "
+                "vazio usa o atual. Não muda o URL de uma instância existente."
+            )
+        ),
     ] = "",
 ) -> dict[str, Any]:
-    """Guarda o token Moodle no `.env` e valida logo a ligação ao site.
+    """Valida um token Moodle e, só se for válido, guarda-o em `credentials.json`.
 
     Aviso de segurança: o token entra por argumento, pelo que é enviado para o
     provider de LLM configurado no cliente e fica no histórico da sessão. Para
-    configuração inicial, preferir escrever o `.env` à mão ou usar o capturador
-    `moodlemobile://`. A resposta nunca devolve o token, apenas a sua impressão
-    digital.
+    configuração inicial, preferir o capturador `moodlemobile://`. A resposta
+    nunca devolve o token, apenas a sua impressão digital.
+
+    O URL de uma instância já configurada não pode ser mudado por aqui: se
+    pudesse, uma instrução escondida num fórum bastaria para apontar a instância
+    para outro servidor, e um token definido no ambiente (que tem precedência)
+    passaria a ser enviado para lá em todas as chamadas.
 
     Args:
         token: O `wstoken` do Web Service do Moodle.
         instance: Nome da instância a configurar; vazio usa a predefinida.
-        moodle_url: URL base alternativo a gravar para esta instância.
+        moodle_url: URL base de uma instância ainda sem URL.
 
     Returns:
-        Dicionário com `saved_to`, `instance`, `token_fingerprint` e o `site_info`
-        devolvido pelo Moodle (já redigido).
+        Dicionário com `saved`, `saved_to`, `instance`, `token_fingerprint` e o
+        `site_info` devolvido pelo Moodle (já redigido), ou `error`/`message`
+        se o token não for gravado.
     """
     clean_token = token.strip()
     name = (instance or DEFAULT_INSTANCE).strip().lower()
-    if moodle_url:
-        config.save_instance_url(name, moodle_url)
-    env_file = str(config.save_instance_token(name, clean_token))
+    current = config.instances().get(name)
+    current_url = current.url if current else ""
 
-    site_info = _moodle_call("core_webservice_get_site_info", instance=instance)
-    return {
-        "saved_to": env_file,
-        "instance": instance,
+    if moodle_url:
+        new_url = _validate_instance_url(moodle_url)
+        if current_url and current_url.rstrip("/").lower() != new_url.lower():
+            return {
+                "error": True,
+                "saved": False,
+                "instance": name,
+                "message": (
+                    f"Recusado: a instância '{name}' já tem URL ({current_url}). Mudar o URL de uma "
+                    "instância existente só é possível na configuração (config.toml ou "
+                    f"MOODLE_{name.upper()}_URL), não por uma ferramenta."
+                ),
+            }
+        base_url = new_url
+    elif current_url:
+        base_url = current_url
+    else:
+        return {
+            "error": True,
+            "saved": False,
+            "instance": name,
+            "message": f"A instância '{name}' não tem URL configurado; indica `moodle_url` (https://).",
+        }
+
+    # Valida o token NOVO, contra o URL que vai ficar gravado, ANTES de gravar:
+    # um token errado não pode substituir um que funciona.
+    site_info = _ws_call(base_url, clean_token, "core_webservice_get_site_info")
+    if not isinstance(site_info, dict) or "exception" in site_info or "userid" not in site_info:
+        return {
+            "error": True,
+            "saved": False,
+            "instance": name,
+            "token_fingerprint": _token_fingerprint(clean_token),
+            "message": "O Moodle recusou o token; nada foi gravado.",
+            "details": site_info,
+        }
+
+    if moodle_url and not current_url:
+        config.save_instance_url(name, base_url)
+    saved_to = str(config.save_instance_token(name, clean_token))
+
+    result: dict[str, Any] = {
+        "saved": True,
+        "saved_to": saved_to,
+        "instance": name,
         "token_fingerprint": _token_fingerprint(clean_token),
         "site_info": site_info,
     }
+    if config.resolve_instance(name).token != clean_token:
+        result["warning"] = (
+            "O token foi gravado, mas outro definido no ambiente ou no .env legado tem precedência "
+            f"e continua a ser usado. Remove MOODLE_{name.upper()}_TOKEN de lá para usar o novo."
+        )
+    return result
+
+
+_LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "[::1]"})
+
+
+def _validate_instance_url(url: str) -> str:
+    """Normaliza o URL base de uma instância e exige HTTPS.
+
+    HTTP só é aceite para `localhost`, para instâncias de desenvolvimento: o
+    token vai em todos os pedidos e não pode circular em claro.
+
+    Args:
+        url: URL base proposto.
+
+    Returns:
+        O URL sem barra final.
+
+    Raises:
+        ValueError: Se o URL não for HTTPS, não tiver anfitrião ou trouxer
+            credenciais, query ou fragmento.
+    """
+    clean = url.strip().rstrip("/")
+    try:
+        parsed = parse_url(requests.Request("GET", clean).prepare().url or "")
+    except (requests.RequestException, ValueError):
+        raise ValueError(f"URL de instância inválido: {clean!r}") from None
+    host = (parsed.host or "").lower()
+    secure = parsed.scheme == "https" or (parsed.scheme == "http" and host in _LOCAL_HOSTS)
+    if not host or not secure or parsed.auth or parsed.query or parsed.fragment:
+        raise ValueError(
+            f"URL de instância recusado: {clean!r}. Tem de ser https://<anfitrião>[/caminho], "
+            "sem credenciais, query ou fragmento."
+        )
+    return clean
 
 
 @mcp.tool(annotations=_ann("Capturar token via moodlemobile://", destructive=True))
@@ -385,7 +599,12 @@ def decode_mobile_launch_token(
     raw = launch_url_or_base64.strip()
     if "token=" in raw:
         raw = raw.split("token=", 1)[1].split("&", 1)[0]
-    decoded = base64.b64decode(raw + "===").decode("utf-8", errors="ignore")
+    # Alguns navegadores entregam o payload com percent-encoding (%2B, %2F, %3D).
+    raw = unquote(raw).strip()
+    try:
+        decoded = base64.b64decode(raw + "=" * (-len(raw) % 4)).decode("utf-8", errors="ignore")
+    except (binascii.Error, ValueError):
+        decoded = ""
     parts = decoded.split(":::")
     if len(parts) < 2 or not parts[1].strip():
         return {
@@ -400,12 +619,14 @@ def decode_mobile_launch_token(
         }
 
     token = parts[1].strip()
+    validation = set_moodle_token(token, instance=instance)
     return {
-        "saved": True,
+        "saved": bool(validation.get("saved")),
         "instance": instance,
         "token_fingerprint": _token_fingerprint(token),
         "has_privatetoken": len(parts) >= 3 and bool(parts[2].strip()),
-        "validation": set_moodle_token(token, instance=instance),
+        "validation": validation,
+        **({"message": validation["message"]} if "message" in validation else {}),
     }
 
 
@@ -627,7 +848,10 @@ def download_moodle_file(
     file_url: Annotated[
         str,
         Field(
-            description="O `fileurl` devolvido pela API do Moodle, sem token (é acrescentado pelo servidor)."
+            description=(
+                "O `fileurl` (pluginfile.php) devolvido pela API do Moodle, sem token. "
+                "Só são aceites ficheiros da instância configurada."
+            )
         ),
     ],
     dest_path: Annotated[
@@ -660,15 +884,14 @@ def download_moodle_file(
         `extracted_markdown` e `pdf_pages`.
 
     Raises:
-        ValueError: Se `dest_path` cair fora do Vault.
+        ValueError: Se `dest_path` cair fora do Vault ou se `file_url` não for um
+            ficheiro da instância configurada (o token nunca sai para outro anfitrião).
+        MoodleRequestError: Se o download falhar.
     """
-    _, token = _resolve_target(instance)
-    auth_url = _append_token_to_fileurl(file_url, token)
     target = _resolve_in_vault(dest_path)
-    target.parent.mkdir(parents=True, exist_ok=True)
 
-    with requests.get(auth_url, stream=True, timeout=60) as r:
-        r.raise_for_status()
+    with _authed_get(file_url, instance, stream=True, timeout=60) as r:
+        target.parent.mkdir(parents=True, exist_ok=True)
         with target.open("wb") as f:
             for chunk in r.iter_content(chunk_size=65536):
                 if chunk:
@@ -728,7 +951,6 @@ def download_all_course_materials_to_obsidian(
     (`<Vault>/Unidades Curriculares/<Nome da UC>/Materiais/`),
     convertendo também os PDFs e Páginas HTML em notas Markdown pesquisáveis!
     """
-    _, token = _resolve_target(instance)
     contents = get_course_contents(course_id, instance=instance)
     if not isinstance(contents, list):
         return {"error": True, "details": contents}
@@ -762,9 +984,7 @@ def download_all_course_materials_to_obsidian(
                     dest = sec_dir / fname
                     try:
                         if fname.lower().endswith((".html", ".htm")):
-                            auth_url = _append_token_to_fileurl(furl, token)
-                            r = requests.get(auth_url, timeout=30)
-                            r.raise_for_status()
+                            r = _authed_get(furl, instance, timeout=30)
                             sec_dir.mkdir(parents=True, exist_ok=True)
                             md_dest = sec_dir / f"{Path(fname).stem}.md"
                             md_dest.write_text(
@@ -914,17 +1134,21 @@ def upload_file_to_draft(
     if not path.exists():
         return {"error": True, "message": f"Ficheiro não encontrado: {path}"}
 
+    if not token:
+        return {"error": True, "message": f"Token para '{instance}' não está configurado."}
+
     upload_url = f"{base_url}/webservice/upload.php"
-    params: dict[str, Any] = {
+    # O token vai no corpo multipart e não na query: o `upload.php` lê-o com
+    # `required_param`, que aceita ambos, e assim não aparece em URLs nem em erros.
+    fields: dict[str, Any] = {
         "token": token,
         "filearea": "draft",
         "itemid": item_id,
     }
     with path.open("rb") as f:
         files = {"file_1": (path.name, f)}
-        response = requests.post(upload_url, params=params, files=files, timeout=90)
-    response.raise_for_status()
-    return response.json()
+        response = _request("POST", upload_url, data=fields, files=files, timeout=90)
+    return _redact_secrets(response.json())
 
 
 @mcp.tool(annotations=_ann("Submeter trabalho / e-fólio", destructive=True, idempotent=False))
@@ -1625,9 +1849,6 @@ logger = logging.getLogger("moodle-mcp")
 #: metade sem perder o fluxo principal de sincronização para o Obsidian.
 TOOLSETS: dict[str, tuple[str, ...]] = {
     "core": (
-        "set_moodle_token",
-        "decode_mobile_launch_token",
-        "extract_token_from_session_cookie",
         "get_site_info",
         "get_enrolled_courses",
         "get_course_contents",
@@ -1665,6 +1886,11 @@ TOOLSETS: dict[str, tuple[str, ...]] = {
         "create_forum_discussion",
         "send_instant_message",
     ),
+    "auth": (
+        "set_moodle_token",
+        "decode_mobile_launch_token",
+        "extract_token_from_session_cookie",
+    ),
     "raw": ("call_any_moodle_wsfunction",),
 }
 
@@ -1680,6 +1906,11 @@ TOOLSETS: dict[str, tuple[str, ...]] = {
 #: `raw` fica de fora pela mesma razão vista de outro ângulo: o
 #: `call_any_moodle_wsfunction` dá acesso total à API de Web Services, escrita
 #: incluída, o que é bom para diagnóstico e mau para estar sempre ligado.
+#:
+#: `auth` fica de fora porque gravar credenciais não é algo que o modelo precise
+#: de fazer: o handler `moodlemobile://` faz o login sem passar pelo canal MCP.
+#: Exposto, um post de fórum com instruções escondidas poderia trocar o token
+#: guardado pelo de outra conta.
 DEFAULT_TOOLSETS = ("core", "grades", "forums", "obsidian")
 
 
@@ -1749,7 +1980,7 @@ def resolve_toolsets(spec: str) -> set[str]:
             f"Toolset(s) desconhecido(s): {', '.join(unknown)}. Disponíveis: {', '.join(TOOLSETS)}."
         )
     if "core" not in requested:
-        # Sem `core` não há autenticação nem listagem de disciplinas, pelo que
+        # Sem `core` não há informação do site nem listagem de disciplinas, pelo que
         # nenhuma das outras ferramentas teria por onde começar.
         logger.info("A acrescentar o toolset 'core', necessário a todos os outros.")
         requested.add("core")
@@ -1885,6 +2116,7 @@ def main(argv: list[str] | None = None) -> int:
     for risky, nota in (
         ("write", "podem submeter trabalhos, publicar em fóruns e enviar mensagens"),
         ("raw", "dão acesso total à API de Web Services, escrita incluída"),
+        ("auth", "podem substituir o token guardado"),
     ):
         if risky in enabled:
             logger.warning("Toolset '%s' ativo: as suas ferramentas %s.", risky, nota)
