@@ -4,6 +4,7 @@ Nenhum teste faz pedidos reais: o `responses` intercepta tudo, e um pedido não
 registado falha em vez de sair para a rede.
 """
 
+import asyncio
 import base64
 import json
 from urllib.parse import parse_qs, quote, urlparse
@@ -155,12 +156,13 @@ def test_course_materials_errors_have_no_token(vault, monkeypatch):
 
 
 @responses.activate
-def test_upload_sends_token_in_body_not_in_url(vault):
+def test_upload_sends_token_in_body_not_in_url(vault, monkeypatch):
+    monkeypatch.setenv("MOODLE_MCP_CONFIRM_WRITES", "client")
     (vault / "efolio.pdf").write_bytes(b"conteudo")
     upload = f"{BASE}/webservice/upload.php"
     responses.post(upload, json=[{"itemid": 99, "filename": "efolio.pdf"}])
 
-    result = server.upload_file_to_draft("efolio.pdf", instance="test")
+    result = asyncio.run(server.upload_file_to_draft("efolio.pdf", instance="test"))
 
     request = responses.calls[0].request
     assert TOKEN not in request.url
@@ -169,11 +171,12 @@ def test_upload_sends_token_in_body_not_in_url(vault):
 
 
 @responses.activate
-def test_upload_error_text_has_no_token(vault):
+def test_upload_error_text_has_no_token(vault, monkeypatch):
+    monkeypatch.setenv("MOODLE_MCP_CONFIRM_WRITES", "client")
     (vault / "efolio.pdf").write_bytes(b"conteudo")
     responses.post(f"{BASE}/webservice/upload.php", status=500)
     with pytest.raises(server.MoodleRequestError) as excinfo:
-        server.upload_file_to_draft("efolio.pdf", instance="test")
+        asyncio.run(server.upload_file_to_draft("efolio.pdf", instance="test"))
     assert TOKEN not in str(excinfo.value)
 
 
