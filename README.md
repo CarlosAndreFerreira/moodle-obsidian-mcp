@@ -119,18 +119,30 @@ servidor de outra.
 
 ### Toolsets
 
-As 32 ferramentas custam ~8 700 tokens de contexto em cada pedido. Expor só o
+As 32 ferramentas custam ~8 900 tokens de contexto em cada pedido. Expor só o
 que usas corta isso para menos de metade:
 
 | `--tools` | Tools | ~tokens | Escrita no Moodle |
 |:---|--:|--:|:---|
-| **(omissão)** | **24** | **6 189** | **não** |
-| `core,grades,forums,obsidian,write` | 31 | 8 462 | sim |
-| `all` | 32 | 8 733 | sim, mais a API livre |
-| `core,obsidian` | 15 | 4 435 | não |
-| `core` | 11 | 2 881 | não |
+| **(omissão)** | **21** | **~4 950** | **não** |
+| `core,grades,forums,obsidian,write` | 28 | ~7 250 | sim |
+| `all` | 32 | ~8 900 | sim, mais a API livre |
+| `core,obsidian` | 12 | ~3 200 | não |
+| `core` | 8 | ~1 600 | não |
 
 `core` é sempre incluído.
+
+**As ferramentas que gravam credenciais (`auth`) também não vêm ligadas.**
+`set_moodle_token`, `decode_mobile_launch_token` e
+`extract_token_from_session_cookie` permitiriam que um post de fórum com
+instruções escondidas trocasse o token guardado. O login faz-se pelo handler
+`moodlemobile://` (ver abaixo), que não passa pelo modelo; quem preferir colar o
+token no chat ativa-as com `--tools ...,auth`. Mesmo assim, `set_moodle_token`
+valida o token antes de o gravar, só aceita URLs `https://` e não muda o URL de
+uma instância já configurada.
+
+Os downloads só juntam o token a ficheiros (`pluginfile.php`) da instância
+configurada: um URL de outro anfitrião é recusado antes de qualquer pedido.
 
 **As ferramentas que escrevem no Moodle não vêm ligadas.** Submeter um trabalho,
 publicar num fórum avaliado ou enviar uma mensagem age em nome do estudante do
@@ -139,7 +151,7 @@ lê do Moodle e escreve apenas no Vault local; para as activar é preciso
 `--tools ...,write`, e o servidor registra um aviso no arranque quando estão
 ligadas. O mesmo vale para `raw`, que expõe a API de Web Services por inteiro.
 
-Das 24 ferramentas da omissão, 17 estão marcadas como `readOnlyHint`, pelo que
+Das 21 ferramentas da omissão, 17 estão marcadas como `readOnlyHint`, pelo que
 um cliente as pode auto-aprovar sem auto-aprovar nada irreversível.
 
 ### Configuração nos clientes
