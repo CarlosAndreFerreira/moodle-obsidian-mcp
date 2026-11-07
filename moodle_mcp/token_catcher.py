@@ -49,10 +49,10 @@ def handle_url(url: str) -> None:
             # Sem token novo não há nada a sincronizar: prosseguir usaria o token
             # que já estivesse guardado e faria uma sincronização completa a
             # partir de um URL inválido.
-            target.write_text(
+            config.write_private(
+                target,
                 f"[{stamp}] ERRO: não foi possível obter um token do URL recebido.\n"
                 f"{res.get('message', '')}\n",
-                encoding="utf-8",
             )
             return
         site_info = res.get("validation", {}).get("site_info", {})
@@ -63,15 +63,15 @@ def handle_url(url: str) -> None:
             instance=moodle_mcp.DEFAULT_INSTANCE,
         )
         # Nem o token nem a sua impressão digital entram no registo.
-        target.write_text(
+        config.write_private(
+            target,
             f"[{stamp}] OK\n"
             f"Instância: {moodle_mcp.DEFAULT_INSTANCE}\n"
             f"Utilizador: {user}\n"
             f"Disciplinas sincronizadas: {sync_res.get('courses_synced', 0)}\n",
-            encoding="utf-8",
         )
     except Exception as exc:
-        target.write_text(f"[{stamp}] ERRO: {exc}\n", encoding="utf-8")
+        config.write_private(target, f"[{stamp}] ERRO: {exc}\n")
 
 
 def cli() -> int:

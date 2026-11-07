@@ -23,12 +23,14 @@ para que o resultado dos três sistemas possa ser verificado em qualquer um dele
 
 from __future__ import annotations
 
+import importlib
 import os
 import platform
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 from moodle_mcp import __version__
 
@@ -233,7 +235,8 @@ def _install_linux(command: list[str]) -> dict[str, object]:
 
 
 def _install_windows(command: list[str]) -> dict[str, object]:
-    import winreg  # Só existe em Windows.
+    # Só existe em Windows; importado dinamicamente para o mypy não o verificar noutros sistemas.
+    winreg: Any = importlib.import_module("winreg")
 
     steps: list[str] = []
     for subkey, name, value in windows_registry_values(command):

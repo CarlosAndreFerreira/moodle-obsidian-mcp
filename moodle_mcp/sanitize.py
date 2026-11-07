@@ -104,7 +104,7 @@ def strip_hidden_html(html: str) -> str:
     if "<" not in html:
         return html
     soup = BeautifulSoup(html, "html.parser")
-    doomed = [node for node in soup.find_all(string=lambda s: isinstance(s, Comment))]
+    doomed: list[Any] = [node for node in soup.find_all(string=lambda s: isinstance(s, Comment))]
     doomed += soup.find_all(_NON_CONTENT_TAGS)
     doomed += [tag for tag in soup.find_all(True) if _is_hidden(tag)]
     if not doomed:

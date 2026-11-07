@@ -154,6 +154,25 @@ ligadas. O mesmo vale para `raw`, que expõe a API de Web Services por inteiro.
 Das 21 ferramentas da omissão, 17 estão marcadas como `readOnlyHint`, pelo que
 um cliente as pode auto-aprovar sem auto-aprovar nada irreversível.
 
+### Fiabilidade
+
+* **A sincronização não pára por causa de uma UC.** Cada disciplina é
+  sincronizada à parte; uma secção que o Moodle recuse (testes, escolhas, notas)
+  fica vazia e o problema aparece em `errors`, com `status: "parcial"`. Só um
+  token inválido ou em falta pára tudo, com instruções para voltar a fazer login.
+* **Erros do Moodle chegam como erros** (`isError` no MCP), com a causa e o que
+  fazer, em vez de virem disfarçados de resultado.
+* **Nada se sobrescreve por acidente:** ficheiros, páginas, fóruns e UCs com o
+  mesmo nome ganham ` (2)`, ` (3)`…; as páginas do Moodle (`index.html`) ficam com
+  o nome do módulo. Os nomes são válidos em Windows, macOS e Linux.
+* **Downloads atómicos e com limite:** um download que falhe deixa o ficheiro
+  anterior intacto, e nenhum ficheiro passa de `MOODLE_MCP_MAX_DOWNLOAD_MB` (500).
+* **Segredos:** `credentials.json` e `last_auth.log` são escritos de forma
+  atómica e já com `0600`; um `credentials.json` ilegível é guardado à parte em
+  vez de ser apagado; o token gravado pelo login tem precedência sobre um token
+  antigo no `.env`. `moodle-mcp --show-config` (e o arranque) avisam de ficheiros
+  legíveis por outros utilizadores.
+
 ### Proteção contra prompt injection
 
 Posts de fórum, páginas e descrições são escritos por qualquer participante da
