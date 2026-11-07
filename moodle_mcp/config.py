@@ -59,6 +59,9 @@ SETTINGS: dict[str, tuple[str, str]] = {
     "obsidian_vault_dir": ("OBSIDIAN_VAULT_DIR", "~/Doutoramento"),
     "tools": ("MOODLE_MCP_TOOLS", ""),
     "default_instance": ("MOODLE_DEFAULT_INSTANCE", ""),
+    # Quando é pedida confirmação ao utilizador antes de agir no Moodle:
+    # always | untrusted | client (ver `server._require_confirmation`).
+    "confirm_writes": ("MOODLE_MCP_CONFIRM_WRITES", "always"),
 }
 
 #: Opções secretas, guardadas em `credentials.json` em vez de `config.toml`.
