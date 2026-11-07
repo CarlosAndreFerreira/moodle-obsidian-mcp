@@ -154,6 +154,37 @@ ligadas. O mesmo vale para `raw`, que expõe a API de Web Services por inteiro.
 Das 21 ferramentas da omissão, 17 estão marcadas como `readOnlyHint`, pelo que
 um cliente as pode auto-aprovar sem auto-aprovar nada irreversível.
 
+### Proteção contra prompt injection
+
+Posts de fórum, páginas e descrições são escritos por qualquer participante da
+disciplina e chegam ao modelo. Nenhum modelo resiste de forma fiável a instruções
+escondidas nesse conteúdo (OWASP LLM01), por isso as defesas são do lado do
+servidor e não dependem do modelo:
+
+* **Conteúdo invisível é retirado** de todas as respostas do Moodle: texto em
+  elementos escondidos (`display:none`, `font-size:0`, `hidden`, comentários) e
+  caracteres invisíveis (bloco Unicode «tags», largura zero, controlos
+  bidirecionais). O modelo passa a ler o mesmo que o estudante vê.
+* **As notas escritas no Vault não executam nada:** blocos `dataviewjs`/`dataview`,
+  expressões inline do Dataview e comandos do Templater ficam desativados, e
+  imagens remotas passam a links (não carregam sozinhas, logo não rastreiam).
+* **Cada ação no Moodle pede confirmação ao utilizador**, pelo servidor
+  (elicitation do MCP), com o destinatário e o texto exatos — também quando o
+  cliente está configurado para aprovar tudo. Recusar, ou um cliente sem
+  elicitation, bloqueia a ação.
+
+O comportamento da confirmação escolhe-se com `MOODLE_MCP_CONFIRM_WRITES`:
+
+| Valor | Quando pede confirmação |
+|:---|:---|
+| `always` (omissão) | antes de qualquer ação no Moodle |
+| `untrusted` | só depois de a sessão ter lido conteúdo de terceiros (posts, páginas, mensagens) |
+| `client` | nunca; depende só da aprovação do cliente MCP (para clientes sem elicitation — não recomendado) |
+
+Limites: um cliente que responda sozinho aos pedidos de confirmação anula a
+última defesa, e texto malicioso visível continua a chegar ao modelo. Por isso as
+ferramentas de escrita continuam desligadas por omissão.
+
 ### Configuração nos clientes
 
 **Claude Code / Claude Desktop** (`mcpServers`):

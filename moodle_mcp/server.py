@@ -34,12 +34,13 @@ from urllib.parse import unquote, urlparse
 import requests
 from bs4 import BeautifulSoup
 from markdownify import markdownify as md_convert
-from mcp.server.fastmcp import FastMCP
+from mcp import types as mcp_types
+from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import ToolAnnotations
-from pydantic import Field
+from pydantic import BaseModel, Field
 from urllib3.util import parse_url
 
-from moodle_mcp import __version__, config, handler
+from moodle_mcp import __version__, config, handler, sanitize
 
 try:  # O PyMuPDF é AGPL-3.0 e fica no extra `[pdf]`; sem ele tudo o resto funciona.
     import pymupdf as fitz
@@ -362,6 +363,150 @@ def _authed_get(file_url: str, instance: str, **kwargs: Any) -> requests.Respons
     return _request("GET", url, params={"token": token}, **kwargs)
 
 
+# ==============================================================================
+# CONFIRMAÇÃO HUMANA DAS AÇÕES NO MOODLE
+#
+# Nenhum modelo resiste de forma fiável a instruções escondidas em conteúdo que
+# lê (OWASP LLM01), e os posts de fórum são escritos por qualquer participante
+# da disciplina. As anotações `destructiveHint` só sugerem ao cliente que
+# pergunte, e muitos clientes estão configurados para aprovar tudo. Por isso é
+# o servidor que pede a confirmação, por elicitation (spec MCP 2025-06-18),
+# mostrando ao estudante o destinatário e o texto exatos — o que é preciso para
+# reparar numa ação que não pediu.
+# ==============================================================================
+
+CONFIRM_MODES = ("always", "untrusted", "client")
+
+#: Funções que só devolvem dados do próprio estudante ou do site, sem texto
+#: escrito por terceiros. Qualquer outra marca a sessão como exposta a
+#: conteúdo não confiável.
+_TRUSTED_WSFUNCTIONS = frozenset(
+    {
+        "core_webservice_get_site_info",
+        "core_course_get_enrolled_courses_by_timeline_classification",
+        "core_enrol_get_users_courses",
+        "core_completion_get_activities_completion_status",
+        "gradereport_overview_get_course_grades",
+        "core_user_get_users_by_field",
+    }
+)
+
+#: Se o processo já entregou ao modelo conteúdo escrito por terceiros. Com o
+#: transporte stdio cada cliente tem o seu processo, pelo que equivale à sessão.
+_untrusted_content_seen = False
+
+
+def _mark_untrusted_content_seen() -> None:
+    global _untrusted_content_seen
+    _untrusted_content_seen = True
+
+
+def _confirm_mode() -> str:
+    mode = (config.get("confirm_writes") or "always").strip().lower()
+    if mode not in CONFIRM_MODES:
+        logger.warning("MOODLE_MCP_CONFIRM_WRITES='%s' inválido; a usar 'always'.", mode)
+        return "always"
+    return mode
+
+
+class _Confirmation(BaseModel):
+    """Resposta do utilizador ao pedido de confirmação."""
+
+    confirmar: bool = Field(description="Marca para autorizar esta ação na tua conta do Moodle.")
+
+
+_MAX_SHOWN = 4000
+
+
+def _shown(value: Any) -> str:
+    text = str(value)
+    if len(text) <= _MAX_SHOWN:
+        return text
+    return f"{text[:_MAX_SHOWN]}… (+{len(text) - _MAX_SHOWN} caracteres não mostrados)"
+
+
+async def _require_confirmation(ctx: Context | None, action: str, details: dict[str, Any]) -> None:
+    """Pede ao utilizador, e não ao modelo, que confirme uma ação no Moodle.
+
+    Modos (`MOODLE_MCP_CONFIRM_WRITES`):
+
+    * `always` (omissão): pede sempre.
+    * `untrusted`: pede só depois de a sessão ter lido conteúdo de terceiros
+      (posts, páginas, mensagens), que é quando uma injeção pode ter entrado.
+    * `client`: não pede; confia na aprovação do cliente MCP. Para clientes sem
+      elicitation, e com aviso no arranque.
+
+    Falha em fechado: se for preciso confirmar e o cliente não o suportar, a
+    ação é recusada.
+
+    Args:
+        ctx: O contexto MCP injetado na ferramenta.
+        action: Descrição curta da ação, mostrada no topo do pedido.
+        details: Campos a mostrar, com os valores exatos que vão ser enviados.
+
+    Raises:
+        PermissionError: Se a confirmação não for possível ou for recusada.
+    """
+    mode = _confirm_mode()
+    if mode == "client" or (mode == "untrusted" and not _untrusted_content_seen):
+        return
+
+    hint = (
+        "Para usar ferramentas de escrita num cliente sem elicitation, define "
+        "MOODLE_MCP_CONFIRM_WRITES=client (a aprovação passa a depender só do cliente)."
+    )
+    try:
+        session = ctx.session if ctx is not None else None
+        supported = session is not None and session.check_client_capability(
+            mcp_types.ClientCapabilities(elicitation=mcp_types.ElicitationCapability())
+        )
+    except Exception:  # sem pedido ativo (chamada interna) ou SDK diferente
+        supported = False
+    if not supported or ctx is None:
+        raise PermissionError(
+            "Ação recusada: esta ação no Moodle exige confirmação do utilizador e o cliente MCP "
+            f"não suporta pedidos de confirmação (elicitation). {hint}"
+        )
+
+    lines = [f"⚠️ {action}", ""]
+    lines += [f"• {name}: {_shown(value)}" for name, value in details.items()]
+    lines += [
+        "",
+        "Esta ação é feita na tua conta do Moodle e não pode ser desfeita.",
+        "Confirma só se foste tu a pedi-la — instruções escondidas em posts ou páginas "
+        "podem levar o assistente a propor ações que não pediste.",
+    ]
+    try:
+        result = await ctx.elicit(message="\n".join(lines), schema=_Confirmation)
+    except Exception as exc:
+        raise PermissionError(f"Ação recusada: o pedido de confirmação falhou ({exc}). {hint}") from None
+    if result.action != "accept" or not getattr(result.data, "confirmar", False):
+        raise PermissionError(
+            "Ação cancelada: o utilizador não a confirmou. Não voltes a tentar sem um novo pedido explícito."
+        )
+
+
+#: Funções de leitura pelo nome (convenção da API do Moodle); as restantes podem escrever.
+_READ_ONLY_WSFUNCTION = re.compile(r"_(get|search|list|count|check)_|_(get|search|list)$")
+
+
+def _describe_user(user_id: int, instance: str) -> str:
+    """Devolve `"<id> (<nome>)"` para o pedido de confirmação, ou só o id se falhar.
+
+    Mostrar o nome é o que permite reparar num destinatário que o estudante não
+    escolheu.
+    """
+    try:
+        found = _moodle_call(
+            "core_user_get_users_by_field", {"field": "id", "values[0]": user_id}, instance=instance
+        )
+        if isinstance(found, list) and found:
+            return f"{user_id} ({found[0].get('fullname', '?')})"
+    except Exception:  # o nome é informativo; a confirmação continua sem ele
+        pass
+    return f"{user_id} (nome desconhecido — confirma o id)"
+
+
 def _ws_call(
     base_url: str,
     token: str,
@@ -383,7 +528,11 @@ def _ws_call(
         response = _request("GET", url, params=payload, timeout=30)
     else:
         response = _request("POST", url, data=payload, timeout=30)
-    return _redact_secrets(response.json())
+    if wsfunction not in _TRUSTED_WSFUNCTIONS:
+        _mark_untrusted_content_seen()
+    # Redação de segredos e limpeza de conteúdo escondido no único ponto por
+    # onde passam todas as respostas da API.
+    return sanitize.clean_payload(_redact_secrets(response.json()))
 
 
 def _moodle_call(
@@ -418,6 +567,7 @@ def _get_current_user_id(instance: str = DEFAULT_INSTANCE) -> int:
 def _html_to_markdown(html_text: str) -> str:
     if not html_text:
         return ""
+    html_text = sanitize.clean_text(html_text)
     try:
         converted = md_convert(html_text, heading_style="ATX").strip()
         return re.sub(r"\n{3,}", "\n\n", converted)
@@ -426,6 +576,17 @@ def _html_to_markdown(html_text: str) -> str:
         clean = re.sub(r"</p>", "\n\n", clean, flags=re.IGNORECASE)
         clean = re.sub(r"<[^>]+>", "", clean)
         return html.unescape(clean).strip()
+
+
+def _write_note(path: Path, markdown: str) -> None:
+    """Escreve uma nota no Vault com o conteúdo ativo do Obsidian desativado.
+
+    Todas as notas geradas a partir do Moodle passam por aqui: incluem nomes,
+    posts e descrições escritos por terceiros, e um bloco `dataviewjs` ou uma
+    imagem remota num post não pode executar código nem chamar um servidor
+    quando o estudante abre a nota.
+    """
+    path.write_text(sanitize.neutralize_markdown(markdown), encoding="utf-8")
 
 
 def _safe_filename(name: str) -> str:
@@ -692,7 +853,7 @@ def extract_token_from_session_cookie(
 
 
 @mcp.tool(annotations=_ann("Chamar função arbitrária da API", destructive=True, idempotent=False))
-def call_any_moodle_wsfunction(
+async def call_any_moodle_wsfunction(
     wsfunction: Annotated[
         str, Field(description="Nome da função de Web Service, ex.: `core_user_get_users_by_field`.")
     ],
@@ -701,12 +862,23 @@ def call_any_moodle_wsfunction(
         Field(description="Parâmetros em JSON. Arrays usam a sintaxe do Moodle, ex.: {'courseids[0]': 42}."),
     ] = "{}",
     instance: Inst = DEFAULT_INSTANCE,
+    ctx: Context = None,  # type: ignore[assignment]  # injetado pelo FastMCP
 ) -> Any:
     """
     Ferramenta universal de baixo nível: permite chamar QUALQUER função da API Web Services do Moodle
     (ex.: `core_user_get_users_by_field`, `mod_glossary_get_entries_by_letter`, etc.) passando parâmetros em JSON.
     """
     params = json.loads(params_json) if params_json else {}
+    if not _READ_ONLY_WSFUNCTION.search(wsfunction):
+        await _require_confirmation(
+            ctx,
+            "Chamar uma função da API do Moodle que pode alterar dados",
+            {
+                "Instância": instance,
+                "Função": wsfunction,
+                "Parâmetros": json.dumps(params, ensure_ascii=False),
+            },
+        )
     return _moodle_call(wsfunction, params, instance=instance)
 
 
@@ -794,7 +966,7 @@ def get_activities_completion_status(
 
 
 @mcp.tool(annotations=_ann("Marcar atividade como concluída"))
-def toggle_activity_completion(
+async def toggle_activity_completion(
     cmid: Annotated[
         int,
         Field(
@@ -805,11 +977,17 @@ def toggle_activity_completion(
         bool, Field(description="True marca a atividade como concluída; False desmarca.")
     ] = True,
     instance: Inst = DEFAULT_INSTANCE,
+    ctx: Context = None,  # type: ignore[assignment]  # injetado pelo FastMCP
 ):
     """
     Marca ou desmarca manualmente uma atividade/recurso da disciplina como concluída (`core_completion_update_activity_completion_status_manually`).
     `cmid` é o ID do módulo do curso (course module id).
     """
+    await _require_confirmation(
+        ctx,
+        "Marcar atividade como concluída" if completed else "Desmarcar atividade como concluída",
+        {"Instância": instance, "cmid": cmid},
+    )
     return _moodle_call(
         "core_completion_update_activity_completion_status_manually",
         {"cmid": cmid, "completed": 1 if completed else 0},
@@ -922,13 +1100,13 @@ def download_moodle_file(
                 "",
             ]
             for idx, page in enumerate(doc, start=1):
-                text = page.get_text("text").strip()
+                text = sanitize.strip_invisible(page.get_text("text")).strip()
                 if text:
                     md_pages.append(f"## Página {idx}\n\n{text}\n")
             n_pages = len(doc)
             doc.close()
             md_path = target.with_suffix(".pdf.md")
-            md_path.write_text("\n".join(md_pages), encoding="utf-8")
+            _write_note(md_path, "\n".join(md_pages))
             result["extracted_markdown"] = str(md_path)
             result["pdf_pages"] = n_pages
         except Exception as e:
@@ -987,10 +1165,7 @@ def download_all_course_materials_to_obsidian(
                             r = _authed_get(furl, instance, timeout=30)
                             sec_dir.mkdir(parents=True, exist_ok=True)
                             md_dest = sec_dir / f"{Path(fname).stem}.md"
-                            md_dest.write_text(
-                                f"# {mname}\n\n{_html_to_markdown(r.text)}\n",
-                                encoding="utf-8",
-                            )
+                            _write_note(md_dest, f"# {mname}\n\n{_html_to_markdown(r.text)}\n")
                             downloaded.append(str(md_dest))
                         else:
                             res = download_moodle_file(
@@ -1100,7 +1275,7 @@ def get_course_quizzes(
 
 
 @mcp.tool(annotations=_ann("Enviar ficheiro para rascunho", idempotent=False))
-def upload_file_to_draft(
+async def upload_file_to_draft(
     file_path: Annotated[
         str,
         Field(description="Ficheiro a enviar, dentro do Vault. Relativo resolve a\npartir da raiz do Vault."),
@@ -1109,6 +1284,7 @@ def upload_file_to_draft(
         int, Field(description="`itemid` de um draft existente a reutilizar; 0 cria um novo.")
     ] = 0,
     instance: Inst = DEFAULT_INSTANCE,
+    ctx: Context = None,  # type: ignore[assignment]  # injetado pelo FastMCP
 ) -> Any:
     """Envia um ficheiro do Vault para a área de rascunho (draft area) do Moodle.
 
@@ -1121,6 +1297,7 @@ def upload_file_to_draft(
         file_path: Ficheiro a enviar, dentro do Vault (absoluto ou relativo à raiz).
         item_id: `itemid` do draft a reutilizar; 0 cria um novo.
         instance: Nome da instância Moodle; vazio usa a predefinida.
+        ctx: Contexto MCP, injetado pelo FastMCP (não aparece na schema).
 
     Returns:
         A resposta do `upload.php`, que inclui o `itemid` a passar a
@@ -1137,6 +1314,15 @@ def upload_file_to_draft(
     if not token:
         return {"error": True, "message": f"Token para '{instance}' não está configurado."}
 
+    await _require_confirmation(
+        ctx,
+        "Enviar um ficheiro do Vault para o servidor do Moodle",
+        {
+            "Instância": f"{instance} ({base_url})",
+            "Ficheiro": str(path.relative_to(_vault_root())),
+            "Tamanho": f"{path.stat().st_size} bytes",
+        },
+    )
     upload_url = f"{base_url}/webservice/upload.php"
     # O token vai no corpo multipart e não na query: o `upload.php` lê-o com
     # `required_param`, que aceita ambos, e assim não aparece em URLs nem em erros.
@@ -1148,11 +1334,11 @@ def upload_file_to_draft(
     with path.open("rb") as f:
         files = {"file_1": (path.name, f)}
         response = _request("POST", upload_url, data=fields, files=files, timeout=90)
-    return _redact_secrets(response.json())
+    return sanitize.clean_payload(_redact_secrets(response.json()))
 
 
 @mcp.tool(annotations=_ann("Submeter trabalho / e-fólio", destructive=True, idempotent=False))
-def save_assignment_submission(
+async def save_assignment_submission(
     assign_id: Annotated[int, Field(description="ID do trabalho (campo `id` de get_assignments).")],
     online_text_html: Annotated[
         str, Field(description="Texto da submissão em HTML (plugin 'online text'); vazio não envia texto.")
@@ -1167,12 +1353,25 @@ def save_assignment_submission(
         ),
     ] = False,
     instance: Inst = DEFAULT_INSTANCE,
+    ctx: Context = None,  # type: ignore[assignment]  # injetado pelo FastMCP
 ) -> dict[str, Any]:
     """
     Guarda um trabalho/e-fólio no Moodle (texto online e/ou ficheiros previamente carregados com `upload_file_to_draft`).
     Por segurança, `submit_for_grading=False` guarda em modo rascunho/submissão editável;
     se `submit_for_grading=True`, lacra e submete em definitivo para avaliação.
     """
+    await _require_confirmation(
+        ctx,
+        "ENTREGAR DEFINITIVAMENTE o trabalho para avaliação (deixa de ser editável)"
+        if submit_for_grading
+        else "Guardar o rascunho da submissão de um trabalho",
+        {
+            "Instância": instance,
+            "assign_id": assign_id,
+            "Texto": online_text_html or "(nenhum)",
+            "Ficheiros (itemid do rascunho)": files_draft_item_id or "(nenhum)",
+        },
+    )
     params: dict[str, Any] = {"assignmentid": assign_id}
     if online_text_html:
         params["plugindata[onlinetext_editor][text]"] = online_text_html
@@ -1196,7 +1395,7 @@ def save_assignment_submission(
 
 
 @mcp.tool(annotations=_ann("Comentar numa submissão", idempotent=False))
-def add_submission_comment(
+async def add_submission_comment(
     context_id: Annotated[int, Field(description="ID de contexto do módulo do trabalho no Moodle.")],
     item_id: Annotated[int, Field(description="ID do item a comentar (normalmente o id da submissão).")],
     content: Annotated[str, Field(description="Texto do comentário.")],
@@ -1204,12 +1403,18 @@ def add_submission_comment(
         str, Field(description="Área de comentários do Moodle; raramente precisa de ser alterada.")
     ] = "submission_comments",
     instance: Inst = DEFAULT_INSTANCE,
+    ctx: Context = None,  # type: ignore[assignment]  # injetado pelo FastMCP
 ):
     """
     Adiciona um comentário oficial num trabalho/submissão (ex.: observação para o professor na entrega de um e-fólio).
     `context_id`: contextid do módulo do trabalho (`cmid` context).
     `item_id`: ID da submissão (`submission.id` obtido em `get_assignment_submission`).
     """
+    await _require_confirmation(
+        ctx,
+        "Publicar um comentário numa submissão",
+        {"Instância": instance, "Contexto": context_id, "Item": item_id, "Comentário": content},
+    )
     return _moodle_call(
         "core_comment_add_comments",
         {
@@ -1306,7 +1511,7 @@ def search_all_course_forums(
 
 
 @mcp.tool(annotations=_ann("Responder num fórum", idempotent=False))
-def reply_to_forum_post(
+async def reply_to_forum_post(
     post_id: Annotated[
         int, Field(description="ID do post a que se responde (campo `id` de get_discussion_posts).")
     ],
@@ -1316,11 +1521,23 @@ def reply_to_forum_post(
         int, Field(description="`itemid` de upload_file_to_draft para anexos; 0 não anexa nada.")
     ] = 0,
     instance: Inst = DEFAULT_INSTANCE,
+    ctx: Context = None,  # type: ignore[assignment]  # injetado pelo FastMCP
 ):
     """
     Envia uma resposta/comentário para um post de fórum (como aluno), com suporte opcional para anexo
     (carregado previamente via `upload_file_to_draft`).
     """
+    await _require_confirmation(
+        ctx,
+        "Publicar uma resposta num fórum (visível para a turma)",
+        {
+            "Instância": instance,
+            "Em resposta ao post": post_id,
+            "Assunto": subject,
+            "Mensagem": message_html,
+            "Anexos (itemid)": attachments_draft_itemid or "(nenhum)",
+        },
+    )
     params: dict[str, Any] = {
         "postid": post_id,
         "subject": subject,
@@ -1333,7 +1550,7 @@ def reply_to_forum_post(
 
 
 @mcp.tool(annotations=_ann("Criar tópico num fórum", idempotent=False))
-def create_forum_discussion(
+async def create_forum_discussion(
     forum_id: Annotated[
         int, Field(description="ID do fórum onde criar o tópico (campo `id` de get_course_forums).")
     ],
@@ -1344,8 +1561,21 @@ def create_forum_discussion(
         int, Field(description="`itemid` de upload_file_to_draft para anexos; 0 não anexa nada.")
     ] = 0,
     instance: Inst = DEFAULT_INSTANCE,
+    ctx: Context = None,  # type: ignore[assignment]  # injetado pelo FastMCP
 ):
     """Cria um novo tópico de discussão num fórum da disciplina (com suporte opcional a anexo e grupo)."""
+    await _require_confirmation(
+        ctx,
+        "Criar um tópico num fórum (visível para a turma)",
+        {
+            "Instância": instance,
+            "Fórum": forum_id,
+            "Grupo": "todos" if group_id == -1 else group_id,
+            "Assunto": subject,
+            "Mensagem": message_html,
+            "Anexos (itemid)": attachments_draft_itemid or "(nenhum)",
+        },
+    )
     params: dict[str, Any] = {
         "forumid": forum_id,
         "subject": subject,
@@ -1359,14 +1589,20 @@ def create_forum_discussion(
 
 
 @mcp.tool(annotations=_ann("Enviar mensagem instantânea", idempotent=False))
-def send_instant_message(
+async def send_instant_message(
     to_user_id: Annotated[
         int, Field(description="ID do destinatário (campo `id` de get_course_participants).")
     ],
     text: Annotated[str, Field(description="Texto da mensagem a enviar.")],
     instance: Inst = DEFAULT_INSTANCE,
+    ctx: Context = None,  # type: ignore[assignment]  # injetado pelo FastMCP
 ):
     """Envia uma mensagem privada direta no Moodle para um professor ou colega de doutoramento (`core_message_send_instant_messages`)."""
+    await _require_confirmation(
+        ctx,
+        "Enviar uma mensagem privada no Moodle",
+        {"Instância": instance, "Destinatário": _describe_user(to_user_id, instance), "Mensagem": text},
+    )
     return _moodle_call(
         "core_message_send_instant_messages",
         {
@@ -1498,7 +1734,7 @@ def export_forum_discussions_to_obsidian(
                 )
 
         fpath = foruns_dir / f"{fname}.md"
-        fpath.write_text("\n".join(lines), encoding="utf-8")
+        _write_note(fpath, "\n".join(lines))
         exported_files.append(str(fpath))
 
     return {
@@ -1786,7 +2022,7 @@ def sync_doctoral_dashboard_to_obsidian(
                 uc_lines.append("")
 
         uc_file = uc_dir / uc_note_name
-        uc_file.write_text("\n".join(uc_lines), encoding="utf-8")
+        _write_note(uc_file, "\n".join(uc_lines))
         created_files.append(str(uc_file))
 
         if download_materials:
@@ -1826,7 +2062,7 @@ def sync_doctoral_dashboard_to_obsidian(
     dashboard_lines.append("_⚠️ = prazo já ultrapassado e atividade ainda em falta._")
 
     dashboard_file = target_dir / "Doutoramento - Painel Moodle.md"
-    dashboard_file.write_text("\n".join(dashboard_lines) + "\n", encoding="utf-8")
+    _write_note(dashboard_file, "\n".join(dashboard_lines) + "\n")
     created_files.insert(0, str(dashboard_file))
 
     return {
@@ -2120,6 +2356,15 @@ def main(argv: list[str] | None = None) -> int:
     ):
         if risky in enabled:
             logger.warning("Toolset '%s' ativo: as suas ferramentas %s.", risky, nota)
+    if enabled & {"write", "raw"}:
+        mode = _confirm_mode()
+        if mode == "client":
+            logger.warning(
+                "MOODLE_MCP_CONFIRM_WRITES=client: as ações no Moodle não pedem confirmação ao "
+                "utilizador; dependem só da aprovação do cliente MCP."
+            )
+        else:
+            logger.info("Ações no Moodle pedem confirmação ao utilizador (modo '%s').", mode)
     logger.info(
         "Toolsets ativos: %s | %d ferramentas expostas (%d retiradas, %d titles removidos)",
         ",".join(sorted(enabled)),
