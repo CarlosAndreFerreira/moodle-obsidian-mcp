@@ -23,6 +23,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - uses: astral-sh/setup-uv@v6
+      # O uv.lock tem de corresponder ao pyproject.toml (falha se alguém mudar
+      # dependências sem atualizar o lockfile).
+      - run: uv lock --check
       # Com o extra `pdf`, o mypy também verifica o caminho de extração de PDFs.
       - run: python -m pip install -e ".[dev,pdf]"
       - run: ruff check moodle_mcp tests

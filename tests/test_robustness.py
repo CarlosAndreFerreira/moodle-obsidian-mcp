@@ -11,6 +11,7 @@ import responses
 from conftest import BASE, TOKEN
 
 from moodle_mcp import config, server
+from moodle_mcp import vault as vaultlib
 
 REST = f"{BASE}/webservice/rest/server.php"
 FILE = f"{BASE}/webservice/pluginfile.php/1/mod_resource/content/0/aula.pdf"
@@ -162,17 +163,17 @@ def test_enrolled_courses_falls_back_on_old_moodle_but_not_on_bad_token():
     ],
 )
 def test_safe_filename(name, expected):
-    assert server._safe_filename(name) == expected
+    assert vaultlib.safe_filename(name) == expected
 
 
 def test_safe_filename_truncates_the_stem_and_keeps_the_extension():
-    name = server._safe_filename("x" * 300 + ".pdf")
+    name = vaultlib.safe_filename("x" * 300 + ".pdf")
     assert len(name) == 120 and name.endswith(".pdf")
 
 
 def test_unique_path():
     used: set[Path] = set()
-    names = [server._unique_path(Path("d/index.md"), used).name for _ in range(3)]
+    names = [vaultlib.unique_path(Path("d/index.md"), used).name for _ in range(3)]
     assert names == ["index.md", "index (2).md", "index (3).md"]
 
 

@@ -8,5 +8,5 @@ Submódulos:
     token_catcher: Handler do esquema `moodlemobile://` para captura de token via SSO.
 """
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 __all__ = ["__version__"]

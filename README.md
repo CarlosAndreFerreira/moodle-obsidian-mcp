@@ -38,6 +38,16 @@ cd moodle-obsidian-mcp
 uv pip install -e ".[pdf]"
 ```
 
+Para o handler `moodlemobile://` é preciso uma instalação permanente (o `uvx`
+corre de uma cache que pode ser apagada):
+
+```bash
+uv tool install "moodle-obsidian-mcp[pdf] @ git+https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp"
+```
+
+O pacote chama-se `moodle-obsidian-mcp` (o nome `moodle-mcp` está ocupado no
+PyPI); os comandos continuam a ser `moodle-mcp` e `moodle-mcp-token-catcher`.
+
 O extra `[pdf]` acrescenta a extração de texto de PDFs via PyMuPDF. Fica de fora
 da instalação base porque o PyMuPDF é AGPL-3.0: sem ele, tudo o resto funciona e
 os downloads de PDF apenas não geram o `.md` acompanhante.
@@ -177,6 +187,11 @@ um cliente as pode auto-aprovar sem auto-aprovar nada irreversível.
   uma tem o seu painel (`<nome> (<instância>)`).
 * **Downloads atómicos e com limite:** um download que falhe deixa o ficheiro
   anterior intacto, e nenhum ficheiro passa de `MOODLE_MCP_MAX_DOWNLOAD_MB` (500).
+* **Auditoria:** cada ação no Moodle fica registada em `audit.log` (0600, no
+  diretório de configuração) com a decisão — confirmada, recusada ou executada
+  sem confirmação —, sem tokens e com rotação a 1 MB.
+* **Menos dados pessoais:** `get_course_participants` devolve só id, nome, papéis
+  e grupos; emails e dados de perfil dos colegas não vão para o fornecedor do LLM.
 * **Segredos:** `credentials.json` e `last_auth.log` são escritos de forma
   atómica e já com `0600`; um `credentials.json` ilegível é guardado à parte em
   vez de ser apagado; o token gravado pelo login tem precedência sobre um token
@@ -271,5 +286,9 @@ MIT — ver [LICENSE](LICENSE). O extra `[pdf]` instala o PyMuPDF, que é
 Sem o extra, o servidor funciona e apenas não gera o `.md` acompanhante dos PDFs.
 
 ## 🔒 Segurança e Privacidade
+
+Para reportar uma vulnerabilidade, ver [SECURITY.md](SECURITY.md) (canal privado,
+nunca issues públicas). As mudanças de cada versão estão no [CHANGELOG](CHANGELOG.md).
+
 * O ficheiro `.gitignore` bloqueia estritamente `.env`, `*.log` e quaisquer ficheiros de credenciais/tokens.
-* O script `capture_mobile_token.py` nunca regista tokens em ficheiros de log.
+* O capturador `moodlemobile://` nunca escreve tokens nos registos (`last_auth.log`, `audit.log`).
