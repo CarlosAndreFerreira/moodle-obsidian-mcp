@@ -4,6 +4,18 @@ Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-PT/1.1.0/);
 o projeto segue [versionamento semântico](https://semver.org/lang/pt/) (antes da
 1.0, uma versão menor pode mudar comportamento).
 
+## [Por publicar]
+
+### Adicionado
+- **Plugin do Claude Code** (`plugin/`) e `marketplace.json` na raiz:
+  `/plugin install moodle-obsidian --marketplace
+  CarlosAndreFerreira/moodle-obsidian-mcp`. Arranca o servidor com
+  `uvx moodle-obsidian-mcp[pdf]==<versão>` (versão exata, como o diretório da
+  Anthropic exige), pede o Vault e a língua, aceita um token opcional guardado
+  como segredo e traz a *skill* `moodle-weekly-review`. Preparado para a
+  submissão ao diretório do Claude; os testes obrigam a versão do plugin a
+  acompanhar a do pacote.
+
 ## [0.8.1] — 2026-11-08
 
 ### Adicionado

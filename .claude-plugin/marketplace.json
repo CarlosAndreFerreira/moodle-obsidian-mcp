@@ -1,0 +1,17 @@
+{
+  "name": "moodle-obsidian-mcp",
+  "owner": {
+    "name": "Carlos André Ferreira",
+    "url": "https://github.com/CarlosAndreFerreira"
+  },
+  "metadata": {
+    "description": "Moodle + Obsidian plugin for Claude Code."
+  },
+  "plugins": [
+    {
+      "name": "moodle-obsidian",
+      "source": "./plugin",
+      "description": "Your Moodle courses, grades, deadlines and forums in Claude, synced into an Obsidian vault."
+    }
+  ]
+}

@@ -1,0 +1,42 @@
+{
+  "name": "moodle-obsidian",
+  "displayName": "Moodle + Obsidian",
+  "version": "0.8.1",
+  "description": "Your Moodle courses, grades, deadlines and forums in Claude, synced into an Obsidian vault. Works with SSO universities.",
+  "author": {
+    "name": "Carlos André Ferreira",
+    "url": "https://github.com/CarlosAndreFerreira"
+  },
+  "homepage": "https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp",
+  "repository": "https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp",
+  "documentationUrl": "https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp#readme",
+  "supportUrl": "https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp/issues",
+  "license": "MIT",
+  "keywords": ["moodle", "obsidian", "education", "students", "lms"],
+  "userConfig": {
+    "vault_dir": {
+      "type": "directory",
+      "title": "Obsidian vault",
+      "description": "Folder of your Obsidian vault. Notes, the deadline calendar and course materials are written here, and nowhere else.",
+      "required": true
+    },
+    "language": {
+      "type": "string",
+      "title": "Note language",
+      "description": "Language of the generated notes.",
+      "options": ["en", "pt"],
+      "default": "en"
+    },
+    "moodle_url": {
+      "type": "string",
+      "title": "Moodle URL (optional)",
+      "description": "Your Moodle's https address. Leave empty if you log in with `moodle-mcp --login` (recommended)."
+    },
+    "moodle_token": {
+      "type": "string",
+      "title": "Moodle token (optional)",
+      "description": "Mobile web service token. Leave empty if you log in with `moodle-mcp --login` (recommended).",
+      "sensitive": true
+    }
+  }
+}
