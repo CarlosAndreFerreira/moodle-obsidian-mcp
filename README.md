@@ -53,6 +53,8 @@ The `moodlemobile://` handler needs a permanent install (`uvx` runs from a cache
 uv tool install "moodle-obsidian-mcp[pdf] @ git+https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp"
 ```
 
+From a clone, `./install.sh [vault-path]` does the permanent install (`uv tool install`, or `pipx`), sets the vault, registers the handler and tells you to run `moodle-mcp --login`.
+
 The distribution is named `moodle-obsidian-mcp` (`moodle-mcp` is taken on PyPI); the commands are still `moodle-mcp` and `moodle-mcp-token-catcher`.
 
 The `[pdf]` extra adds PDF text extraction via PyMuPDF. It's kept out of the base install because PyMuPDF is **AGPL-3.0**; without it everything works, PDF downloads just don't get the companion `.md`.
@@ -91,6 +93,7 @@ The config directory follows the OS: `~/.config/moodle-mcp` (Linux), `~/Library/
 ```bash
 moodle-mcp --show-config      # where everything is read from, secrets redacted
 moodle-mcp --list-toolsets    # which tools each toolset exposes
+moodle-mcp --set sync_subdir=Moodle --set instances.utad.url=https://e-learning.utad.pt
 ```
 
 ### Moodle instances

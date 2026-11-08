@@ -259,11 +259,24 @@ def test_valid_token_is_validated_then_saved(cfg_dir):
 
 
 @responses.activate
-def test_new_instance_with_url(cfg_dir):
+def test_first_instance_can_be_created_with_url(cfg_dir, monkeypatch):
+    # Primeira instalação: nenhuma instância configurada.
+    monkeypatch.delenv("MOODLE_TEST_URL")
+    monkeypatch.delenv("MOODLE_TEST_TOKEN")
     responses.post("https://nova.example/webservice/rest/server.php", json=OK_INFO)
     result = server.set_moodle_token("tok", instance="nova", moodle_url="https://nova.example/")
     assert result["saved"] is True
     assert config.resolve_instance("nova").url == "https://nova.example"
+
+
+@responses.activate
+def test_tool_cannot_add_instances_once_one_exists(cfg_dir):
+    # Com auth e write ligados, registar um servidor do atacante permitiria
+    # enviar-lhe ficheiros do Vault com upload_file_to_draft.
+    result = server.set_moodle_token("tok", instance="evil", moodle_url="https://evil.example")
+    assert result["saved"] is False and "instances.evil.url" in result["message"]
+    assert len(responses.calls) == 0
+    assert "evil" not in config.instances()
 
 
 @responses.activate

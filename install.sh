@@ -1,31 +1,45 @@
 #!/usr/bin/env bash
+# Instalação permanente do moodle-mcp a partir deste clone (Linux e macOS).
+# Em Windows, os mesmos passos em PowerShell:
+#   uv tool install --force ".[pdf]"
+#   moodle-mcp --set obsidian_vault_dir=C:\caminho\para\o\Vault
+#   moodle-mcp --install-handler
+#   moodle-mcp --login
+#
+# Uso: ./install.sh [caminho-do-vault]
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VAULT_DIR="${1:-$HOME/Doutoramento}"
+VAULT_DIR="${1:-}"
 
-echo "🚀 A instalar Moodle-Obsidian MCP Suite em: $REPO_DIR"
-mkdir -p "$VAULT_DIR"
-
-# 1. Criar ambiente virtual Python (via uv ou python3 -m venv)
+# 1. Instalação permanente, fora do repositório. O handler moodlemobile:// fica
+#    registado com o caminho do executável, pelo que não pode viver numa cache
+#    efémera (uvx) nem num venv que se apague com o clone.
 if command -v uv >/dev/null 2>&1; then
-    uv venv --python 3.12 "$REPO_DIR/.venv"
-    uv pip install --python "$REPO_DIR/.venv/bin/python" -e "$REPO_DIR[pdf]"
+    uv tool install --force "$REPO_DIR[pdf]"
+    BIN_DIR="$(uv tool dir --bin)"
+elif command -v pipx >/dev/null 2>&1; then
+    pipx install --force "$REPO_DIR[pdf]"
+    BIN_DIR="${PIPX_BIN_DIR:-$HOME/.local/bin}"
 else
-    python3 -m venv "$REPO_DIR/.venv"
-    "$REPO_DIR/.venv/bin/pip" install --upgrade pip
-    "$REPO_DIR/.venv/bin/pip" install -e "$REPO_DIR[pdf]"
+    echo "Instala primeiro o uv (https://docs.astral.sh/uv/) ou o pipx." >&2
+    exit 1
+fi
+MOODLE_MCP="$BIN_DIR/moodle-mcp"
+
+# 2. Vault do Obsidian (só se for indicado; senão fica o que já estiver configurado)
+if [[ -n "$VAULT_DIR" ]]; then
+    mkdir -p "$VAULT_DIR"
+    "$MOODLE_MCP" --set "obsidian_vault_dir=$VAULT_DIR"
 fi
 
-# 2. Escrever a configuração no diretório do utilizador (não junto ao código:
-#    com uvx/pipx o pacote corre de uma cache efémera e possivelmente só de leitura)
-"$REPO_DIR/.venv/bin/python" - "$VAULT_DIR" <<'PYEOF'
-import sys
-from moodle_mcp import config
-config.save_setting("obsidian_vault_dir", sys.argv[1])
-print(f"✅ Configuração em {config.config_file()}")
-PYEOF
+# 3. Handler moodlemobile:// para o login por SSO
+"$MOODLE_MCP" --install-handler
 
-# 3. Registar o handler moodlemobile:// (o próprio programa sabe fazê-lo em
-#    Linux, Windows e macOS; aqui só o invocamos)
-"$REPO_DIR/.venv/bin/moodle-mcp" --install-handler
+echo
+"$MOODLE_MCP" --show-config
+echo
+echo "Próximos passos:"
+echo "  1. Se ainda não está, acrescenta $BIN_DIR ao PATH (uv: 'uv tool update-shell')."
+echo "  2. Configura a instância (se ainda não estiver): moodle-mcp --show-config"
+echo "  3. Faz login no Moodle no navegador e corre: moodle-mcp --login"

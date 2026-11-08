@@ -91,6 +91,30 @@ def table_cell(value: Any) -> str:
     return re.sub(r"\s*\n\s*", " ", str(value)).replace("|", "\\|")
 
 
+def md_link(text: Any, url: str) -> str:
+    """Link Markdown com texto e destino seguros, mesmo com nomes vindos do Moodle.
+
+    Um `]` no nome de um módulo fechava o texto do link antes do tempo, e um
+    `)` ou um espaço no URL cortava o destino. O texto fica com parênteses
+    retos e barras invertidas escapados e sem quebras de linha; um destino com espaços, parênteses ou
+    `<>` vai entre `<...>` (CommonMark), com `<` e `>` codificados.
+
+    Args:
+        text: Texto visível do link.
+        url: Destino.
+
+    Returns:
+        O link `[texto](destino)`.
+
+    """
+    label = re.sub(r"\s*\n\s*", " ", str(text)).strip() or "link"
+    label = re.sub(r"([\\\[\]])", r"\\\1", label)
+    target = str(url).strip()
+    if re.search(r"[\s()<>]", target):
+        target = "<" + target.replace("<", "%3C").replace(">", "%3E") + ">"
+    return f"[{label}]({target})"
+
+
 def write_note(path: Path, markdown: str) -> None:
     """Escreve uma nota no Vault com o conteúdo ativo do Obsidian desativado.
 

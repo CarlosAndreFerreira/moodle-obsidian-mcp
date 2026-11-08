@@ -47,6 +47,8 @@ corre de uma cache que pode ser apagada):
 uv tool install "moodle-obsidian-mcp[pdf] @ git+https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp"
 ```
 
+A partir de um clone, `./install.sh [caminho-do-vault]` faz a instalação permanente (`uv tool install`, ou `pipx`), define o Vault, regista o handler e indica o `moodle-mcp --login`.
+
 O pacote chama-se `moodle-obsidian-mcp` (o nome `moodle-mcp` está ocupado no
 PyPI); os comandos continuam a ser `moodle-mcp` e `moodle-mcp-token-catcher`.
 
@@ -88,6 +90,7 @@ leitura.
 ```bash
 moodle-mcp --show-config      # onde tudo é lido, sem revelar segredos
 moodle-mcp --list-toolsets    # que ferramentas cada toolset expõe
+moodle-mcp --set sync_subdir=Moodle --set instances.utad.url=https://e-learning.utad.pt
 ```
 
 ### Instâncias Moodle

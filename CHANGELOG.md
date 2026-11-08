@@ -4,6 +4,30 @@ Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-PT/1.1.0/);
 o projeto segue [versionamento semântico](https://semver.org/lang/pt/) (antes da
 1.0, uma versão menor pode mudar comportamento).
 
+## [0.7.0] — 2026-11-08
+
+### Adicionado
+- `moodle-mcp --set CHAVE=VALOR` grava opções no `config.toml`, incluindo
+  `instances.<nome>.url` (só `https`).
+
+### Alterado
+- Todas as ferramentas síncronas correm numa thread quando chamadas por um
+  cliente MCP: um Moodle lento já não deixa o servidor sem responder.
+- `install.sh` faz uma instalação permanente com `uv tool install` (ou `pipx`)
+  em vez de um venv editável no repositório, só define o Vault se for indicado,
+  e termina com o `moodle-mcp --login`.
+
+### Corrigido
+- `extract_token_from_session_cookie` experimenta primeiro o token do serviço da
+  app móvel e só grava um token que o Moodle aceite (antes usava o primeiro
+  hexadecimal da página).
+- Links com nomes vindos do Moodle já não partem com `]`, `)` ou espaços.
+
+### Segurança
+- `set_moodle_token` só cria uma instância nova numa instalação sem nenhuma
+  configurada. Com `auth` e `write` ligados, uma injeção já não consegue
+  registar um servidor seu para lhe enviar ficheiros do Vault.
+
 ## [0.6.0] — 2026-11-07
 
 ### Adicionado
@@ -77,6 +101,7 @@ o projeto segue [versionamento semântico](https://semver.org/lang/pt/) (antes d
 - `set_moodle_token` valida antes de gravar e não muda o URL de uma instância.
 - As ferramentas que gravam credenciais (`auth`) ficam desligadas por omissão.
 
+[0.7.0]: https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp/compare/v0.3.0...v0.4.0
