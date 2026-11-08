@@ -101,6 +101,8 @@ def test_real_process_hides_the_token_from_other_users(tmp_path):
             break
         time.sleep(0.005)
     proc.wait(timeout=20)
+    # Logo a seguir ao fork, antes do exec, o /proc ainda mostra a linha de comandos do pytest.
+    cmdlines = [(t, c) for t, c in cmdlines if b"token_catcher" in c]
 
     with_token = [
         t for t, c in cmdlines if FAKE_TOKEN.encode() in base64.b64decode(c.split(b"token=")[-1] + b"==")
