@@ -303,7 +303,7 @@ def test_async_sync_reports_progress(small_moodle):
 
     ctx = SimpleNamespace(report_progress=report_progress)
     result = asyncio.run(server.sync_doctoral_dashboard_to_obsidian(instance="test", ctx=ctx))
-    assert result["courses_synced"] == 2
+    assert result.courses_synced == 2
     assert reported == [(0, 2, "Ética"), (1, 2, "Lógica"), (2, 2, "painel")]
 
 

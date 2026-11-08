@@ -157,7 +157,7 @@ def test_sync_reports_what_changed_and_writes_calendar(evolving_moodle, vault):
     first = server.sync_dashboard(instance="test")
     note = vault / "O que mudou no Moodle.md"
     assert "Primeira sincronização" in note.read_text(encoding="utf-8")
-    assert server.get_recent_changes(instance="test")["first_sync"] is True
+    assert server.recent_changes(instance="test")["first_sync"] is True
     assert first["changes_count"] == 0
 
     evolving_moodle["grade"] = "4,0"
@@ -166,7 +166,7 @@ def test_sync_reports_what_changed_and_writes_calendar(evolving_moodle, vault):
 
     text = note.read_text(encoding="utf-8")
     assert "e-fólio A: 4,0" in text and "Tópico novo" in text and "Grupo 2" in text
-    recent = server.get_recent_changes(instance="test")
+    recent = server.recent_changes(instance="test")
     assert recent["first_sync"] is False and len(recent["changes"]) == second["changes_count"] == 2
 
     calendar = (vault / "Doutoramento - Painel Moodle.ics").read_text(encoding="utf-8")
@@ -185,4 +185,54 @@ def test_sync_keeps_the_materials_state(evolving_moodle, vault):
 
 
 def test_recent_changes_before_any_sync(vault):
-    assert server.get_recent_changes(instance="test")["changes"] == []
+    assert server.recent_changes(instance="test")["changes"] == []
+
+
+# ------------------------------------------------------------------------------
+# Respostas estruturadas
+# ------------------------------------------------------------------------------
+
+
+def _tools():
+    import asyncio
+
+    return {t.name: t for t in asyncio.run(server.mcp.list_tools())}
+
+
+def test_main_tools_declare_typed_output_schemas():
+    tools = _tools()
+    for name, field in (
+        ("sync_doctoral_dashboard_to_obsidian", "changes_count"),
+        ("get_recent_changes", "first_sync"),
+        ("download_all_course_materials_to_obsidian", "unchanged_count"),
+        ("export_forum_discussions_to_obsidian", "forums_exported"),
+    ):
+        schema = tools[name].outputSchema
+        assert field in schema["properties"], name
+        assert "result" not in schema["properties"], name  # sem embrulho
+
+
+def test_structured_result_matches_the_schema(evolving_moodle, vault):
+    import asyncio
+
+    import jsonschema
+
+    server.sync_dashboard(instance="test")
+    tool = server.mcp._tool_manager.get_tool("get_recent_changes")
+    _unstructured, structured = tool.fn_metadata.convert_result(server.get_recent_changes(instance="test"))
+    jsonschema.validate(structured, tool.output_schema)
+    assert structured["first_sync"] is True
+
+    result = asyncio.run(server.sync_doctoral_dashboard_to_obsidian(instance="test"))
+    assert result.status == "ok" and result.changes_count == 0
+
+
+def test_moodle_error_becomes_a_tool_error_without_secrets(monkeypatch, vault):
+    import asyncio
+
+    monkeypatch.setattr(
+        server, "download_course_materials", lambda *a, **k: {"error": True, "details": {"token": "SEGREDO"}}
+    )
+    with pytest.raises(RuntimeError, match="erro") as info:
+        asyncio.run(server.download_all_course_materials_to_obsidian(5, instance="test"))
+    assert "SEGREDO" not in str(info.value)

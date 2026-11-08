@@ -53,6 +53,7 @@ from moodle_mcp import (
     transport,
     vault,
 )
+from moodle_mcp.schemas import DownloadResult, ExportResult, RecentChanges, SyncResult
 from moodle_mcp.transport import MoodleRequestError
 
 try:  # O PyMuPDF é AGPL-3.0 e fica no extra `[pdf]`; sem ele tudo o resto funciona.
@@ -1004,14 +1005,15 @@ async def download_all_course_materials_to_obsidian(
     ] = True,
     instance: Inst = DEFAULT_INSTANCE,
     vault_dir: VaultDir = "",
-) -> dict[str, Any]:
+) -> DownloadResult:
     """
     Descarrega TODOS os ficheiros (PDFs, enunciados de e-fólios, slides, textos de apoio e páginas HTML)
     de uma disciplina diretamente para a pasta da Unidade Curricular dentro do teu Vault do Obsidian
     (`<Vault>/Unidades Curriculares/<Nome da UC>/Materiais/`),
     convertendo também os PDFs e Páginas HTML em notas Markdown pesquisáveis!
     """
-    return await _in_thread(download_course_materials, course_id, extract_pdfs, instance, vault_dir)
+    result = await _in_thread(download_course_materials, course_id, extract_pdfs, instance, vault_dir)
+    return DownloadResult.model_validate(_raise_on_error(result))
 
 
 def download_course_materials(
@@ -1568,13 +1570,14 @@ async def export_forum_discussions_to_obsidian(
     course_id: CourseId,
     instance: Inst = DEFAULT_INSTANCE,
     vault_dir: VaultDir = "",
-) -> dict[str, Any]:
+) -> ExportResult:
     """
     Exporta todos os fóruns e debates de uma disciplina para ficheiros Markdown organizados no Obsidian
     (`<Vault>/Unidades Curriculares/<UC>/Foruns/`).
     Útil para teres as orientações do professor e as discussões assíncronas no Vault.
     """
-    return await _in_thread(export_course_forums, course_id, instance, vault_dir)
+    result = await _in_thread(export_course_forums, course_id, instance, vault_dir)
+    return ExportResult.model_validate(_raise_on_error(result))
 
 
 def export_course_forums(
@@ -2034,14 +2037,14 @@ async def sync_doctoral_dashboard_to_obsidian(
     ] = False,
     instance: Inst = DEFAULT_INSTANCE,
     ctx: Context = None,  # type: ignore[assignment]  # injetado pelo FastMCP
-) -> dict[str, Any]:
+) -> SyncResult:
     """
     Sincroniza todas as disciplinas inscritas, notas detalhadas, estado de submissão dos e-fólios/p-fólios,
     progresso de atividades e prazos do Moodle para o teu Vault do Doutoramento no Obsidian.
     Se `download_materials=True`, descarrega também todos os PDFs e converte-os para Markdown!
     Se `export_forums=True`, exporta também todos os tópicos dos fóruns para o Obsidian!
     """
-    return await _in_thread(
+    result = await _in_thread(
         sync_dashboard,
         vault_dir,
         download_materials,
@@ -2049,6 +2052,7 @@ async def sync_doctoral_dashboard_to_obsidian(
         instance,
         on_progress=_progress_reporter(ctx),
     )
+    return SyncResult.model_validate(_raise_on_error(result))
 
 
 def sync_dashboard(
@@ -2272,17 +2276,38 @@ def _task_lines(items: list[tuple[int, str, str, str, str, Any, str]], now_ts: i
 @mcp.tool(annotations=_ann("Ver o que mudou no Moodle", read_only=True))
 def get_recent_changes(
     instance: Inst = DEFAULT_INSTANCE,
-) -> dict[str, Any]:
+) -> RecentChanges:
     """Mostra o que mudou no Moodle entre as duas últimas sincronizações.
 
     Notas lançadas, prazos alterados, trabalhos e testes novos, materiais novos
     e tópicos de fórum novos ou com respostas novas. Não faz pedidos ao Moodle:
     lê o resultado guardado pela última `sync_doctoral_dashboard_to_obsidian`.
     """
+    return RecentChanges.model_validate(recent_changes(instance))
+
+
+def recent_changes(instance: str = DEFAULT_INSTANCE) -> dict[str, Any]:
+    """Implementação de `get_recent_changes`: o último resultado guardado no estado do Vault."""
     last = state.load(vault.vault_root(), (instance or DEFAULT_INSTANCE).strip().lower()).get("last_changes")
     if not isinstance(last, dict):
         return {"changes": [], "message": "Ainda não houve nenhuma sincronização com comparação."}
     return last
+
+
+def _raise_on_error(result: Any) -> dict[str, Any]:
+    """Converte a resposta de erro `{"error": True, "details": ...}` numa exceção.
+
+    As implementações síncronas devolvem esse dicionário (o capturador
+    `moodlemobile://` e os testes leem-no), mas as ferramentas com
+    `outputSchema` têm de devolver o esquema ou um erro MCP (`isError`): um
+    dicionário de erro validado contra o esquema perdia os detalhes.
+    """
+    if isinstance(result, dict) and result.get("error"):
+        details = json.dumps(_redact_secrets(result.get("details")), ensure_ascii=False, default=str)
+        raise RuntimeError(f"O Moodle devolveu um erro: {details[:2000]}")
+    if not isinstance(result, dict):
+        raise RuntimeError(f"Resposta inesperada: {type(result).__name__}")
+    return result
 
 
 # ==============================================================================
@@ -2422,12 +2447,29 @@ def strip_schema_titles() -> int:
     removed = 0
     for tool in _iter_registered_tools():
         schema = getattr(tool, "parameters", None)
-        if not isinstance(schema, dict):
-            continue
-        removed += 1 if schema.pop("title", None) is not None else 0
-        for field_schema in schema.get("properties", {}).values():
-            if isinstance(field_schema, dict):
-                removed += 1 if field_schema.pop("title", None) is not None else 0
+        if isinstance(schema, dict):
+            removed += 1 if schema.pop("title", None) is not None else 0
+            for field_schema in schema.get("properties", {}).values():
+                if isinstance(field_schema, dict):
+                    removed += 1 if field_schema.pop("title", None) is not None else 0
+        output = getattr(getattr(tool, "fn_metadata", None), "output_schema", None)
+        if isinstance(output, dict):
+            removed += _strip_titles(output)
+    return removed
+
+
+def _strip_titles(node: Any) -> int:
+    """Remove recursivamente os `title` (texto) de um esquema JSON; devolve quantos removeu."""
+    removed = 0
+    if isinstance(node, dict):
+        if isinstance(node.get("title"), str):
+            del node["title"]
+            removed += 1
+        for value in node.values():
+            removed += _strip_titles(value)
+    elif isinstance(node, list):
+        for value in node:
+            removed += _strip_titles(value)
     return removed
 
 
