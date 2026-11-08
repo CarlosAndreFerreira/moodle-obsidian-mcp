@@ -122,15 +122,19 @@ def test_neutralize_is_idempotent():
     assert sanitize.neutralize_markdown(once) == once
 
 
-def test_every_vault_note_goes_through_write_note(tmp_path):
-    note = tmp_path / "n.md"
-    vaultlib.write_note(note, "## 🧵 Tópico `$= dv.view('x')`\n```dataviewjs\nx\n```")
+@pytest.mark.parametrize("writer", ["write_note", "write_managed_note"])
+def test_every_vault_note_goes_through_neutralisation(vault, writer):
+    note = vault / "n.md"
+    getattr(vaultlib, writer)(note, "## 🧵 Tópico `$= dv.view('x')`\n```dataviewjs\nx\n```")
     content = note.read_text(encoding="utf-8")
     assert "`$=" not in content and "```dataviewjs" not in content
-    source = pathlib.Path(vaultlib.__file__).read_text(encoding="utf-8")
-    # Todas as notas passam por _write_note, o único sítio que escreve texto no Vault.
+
+
+def test_server_never_writes_notes_directly():
+    # Todas as notas passam por vault.write_note / write_managed_note.
+    source = pathlib.Path(server.__file__).read_text(encoding="utf-8")
     assert source.count(".write_text(") == 0
-    assert source.count("config.atomic_write(") == 1
+    assert source.count("atomic_write(") == 0
 
 
 # ------------------------------------------------------------------------------

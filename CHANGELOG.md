@@ -6,6 +6,19 @@ o projeto segue [versionamento semântico](https://semver.org/lang/pt/) (antes d
 
 ## [Por publicar]
 
+### Adicionado
+- **Notas com bloco gerido:** o conteúdo gerado fica entre os marcadores
+  `%% moodle-mcp:start %%` e `%% moodle-mcp:end %%` (comentários do Obsidian,
+  invisíveis na leitura). O que o estudante escreve fora do bloco, e as
+  propriedades que acrescenta ao frontmatter, sobrevivem às sincronizações.
+  Aplica-se às notas das UCs, ao painel e aos fóruns exportados. Uma nota sem
+  marcadores, de uma versão anterior, é copiada para `.moodle-mcp/backup/`
+  antes da primeira reescrita.
+- **Downloads incrementais:** os materiais que não mudaram no Moodle
+  (`timemodified` e tamanho iguais) e ainda estão no Vault não voltam a ser
+  descarregados. O estado fica em `.moodle-mcp/state-<instância>.json`, no
+  Vault. O resultado ganha `unchanged_count`.
+
 ### Segurança
 - O estado «esta sessão já leu conteúdo de terceiros», usado pelo modo
   `MOODLE_MCP_CONFIRM_WRITES=untrusted`, passa a ser por sessão MCP e não por
