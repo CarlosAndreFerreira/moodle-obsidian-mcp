@@ -4,6 +4,20 @@ Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-PT/1.1.0/);
 o projeto segue [versionamento semântico](https://semver.org/lang/pt/) (antes da
 1.0, uma versão menor pode mudar comportamento).
 
+## [Por publicar]
+
+### Segurança
+- O estado «esta sessão já leu conteúdo de terceiros», usado pelo modo
+  `MOODLE_MCP_CONFIRM_WRITES=untrusted`, passa a ser por sessão MCP e não por
+  processo: os posts lidos por um cliente não obrigam outro cliente do mesmo
+  servidor a confirmar ações, e vice-versa.
+
+### Alterado
+- O extra `[pdf]` fica limitado a `pymupdf<2`. A 2.x passou a depender do
+  `onnxruntime`, do `numpy` e do `pymupdf4llm`, que o projeto não usa: a
+  instalação desce de cerca de 280 MB para cerca de 90 MB. A série 1.x continua
+  mantida.
+
 ## [0.7.2] — 2026-11-08
 
 ### Segurança

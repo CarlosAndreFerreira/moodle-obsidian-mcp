@@ -7,11 +7,13 @@ import logging
 import os
 import re
 import sys
+import weakref
 from datetime import datetime
 from typing import Any
 
 from mcp import types as mcp_types
 from mcp.server.fastmcp import Context
+from mcp.server.lowlevel.server import request_ctx
 from pydantic import BaseModel, Field
 
 from moodle_mcp import config
@@ -46,15 +48,54 @@ TRUSTED_WSFUNCTIONS = frozenset(
     }
 )
 
-#: Se o processo já entregou ao modelo conteúdo escrito por terceiros. Com o
-#: transporte stdio cada cliente tem o seu processo, pelo que equivale à sessão.
+#: Sessões MCP que já receberam conteúdo escrito por terceiros. Fracas, para
+#: uma sessão terminada não ficar presa em memória.
+_tainted_sessions: weakref.WeakSet[Any] = weakref.WeakSet()
+
+#: Para leituras feitas fora de um pedido MCP (chamadas internas, CLI): não há
+#: sessão a que as atribuir, e por prudência contam para todas.
 untrusted_content_seen = False
 
 
+def _current_session() -> Any:
+    """Devolve a sessão do pedido MCP em curso, ou None fora de um pedido.
+
+    O SDK guarda o pedido numa `ContextVar`, e o anyio copia o contexto para as
+    threads de trabalho: uma leitura feita numa thread continua a saber de que
+    sessão veio.
+    """
+    try:
+        return request_ctx.get().session
+    except LookupError:
+        return None
+
+
 def mark_untrusted_content_seen() -> None:
-    """Regista que a sessão já recebeu conteúdo escrito por terceiros."""
+    """Regista que a sessão atual recebeu conteúdo escrito por terceiros.
+
+    É por sessão, e não por processo: com um transporte partilhado por vários
+    clientes, os posts lidos por um não obrigam os outros a confirmar ações.
+    """
     global untrusted_content_seen
-    untrusted_content_seen = True
+    session = _current_session()
+    if session is None:
+        untrusted_content_seen = True
+        return
+    try:
+        _tainted_sessions.add(session)
+    except TypeError:  # sessão sem suporte a referências fracas
+        untrusted_content_seen = True
+
+
+def session_has_untrusted_content(ctx: Any) -> bool:
+    """Diz se a sessão de `ctx` (ou o processo, sem sessão) leu conteúdo de terceiros."""
+    if untrusted_content_seen:
+        return True
+    session = getattr(ctx, "session", None) if ctx is not None else _current_session()
+    try:
+        return session is not None and session in _tainted_sessions
+    except TypeError:
+        return False
 
 
 def confirm_mode() -> str:
@@ -108,7 +149,7 @@ async def require_confirmation(
 
     """
     mode = confirm_mode()
-    if mode == "client" or (mode == "untrusted" and not untrusted_content_seen):
+    if mode == "client" or (mode == "untrusted" and not session_has_untrusted_content(ctx)):
         audit(action, details, f"executada sem confirmação do servidor (modo {mode})")
         return
 
