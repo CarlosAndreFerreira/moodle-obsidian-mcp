@@ -4,6 +4,22 @@ Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-PT/1.1.0/);
 o projeto segue [versionamento semântico](https://semver.org/lang/pt/) (antes da
 1.0, uma versão menor pode mudar comportamento).
 
+## [0.7.2] — 2026-11-08
+
+### Segurança
+- O handler `moodlemobile://` recebia o URL, que contém o token, como argumento
+  de linha de comandos e ficava vivo durante toda a sincronização. Em Linux e
+  macOS os argumentos de qualquer processo são visíveis a todos os utilizadores
+  da máquina (`ps`, `/proc/<pid>/cmdline`). O handler substitui-se agora a si
+  próprio (`execve`) logo no arranque, sem o URL nos argumentos, e passa-o por
+  uma variável de ambiente, que só o dono do processo consegue ler. Os imports
+  pesados só acontecem depois dessa troca. **Quem fez login com uma versão
+  anterior numa máquina partilhada deve revogar o token e voltar a fazer login.**
+
+### Corrigido
+- Uma segunda chamada do navegador ao handler para o mesmo login deixa de
+  escrever um erro no `last_auth.log` por cima do resultado bom.
+
 ## [0.7.1] — 2026-11-08
 
 ### Alterado
@@ -111,6 +127,7 @@ o projeto segue [versionamento semântico](https://semver.org/lang/pt/) (antes d
 - `set_moodle_token` valida antes de gravar e não muda o URL de uma instância.
 - As ferramentas que gravam credenciais (`auth`) ficam desligadas por omissão.
 
+[0.7.2]: https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp/compare/v0.5.0...v0.6.0

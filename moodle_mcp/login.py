@@ -19,12 +19,15 @@ e um prazo, e só aceita uma resposta assinada com ele, uma única vez.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import hmac
 import json
 import secrets
 import time
 from typing import Any
+from urllib.parse import unquote
 
 from moodle_mcp import config
 
@@ -34,6 +37,37 @@ LOGIN_TTL_SECONDS = 15 * 60
 
 class LoginError(ValueError):
     """A resposta `moodlemobile://` não corresponde a nenhum login pendente válido."""
+
+
+def parse_launch_payload(launch_url_or_base64: str) -> list[str]:
+    """Descodifica o payload de `moodlemobile://token=<base64>` sem o validar.
+
+    Args:
+        launch_url_or_base64: O URL completo ou só a parte em Base64.
+
+    Returns:
+        Os campos `[assinatura, token, privatetoken?]`; uma lista com um único
+        campo (possivelmente vazio) se o payload não tiver o formato esperado.
+
+    """
+    raw = launch_url_or_base64.strip()
+    if "token=" in raw:
+        raw = raw.split("token=", 1)[1].split("&", 1)[0]
+    # Alguns navegadores entregam o payload com percent-encoding (%2B, %2F, %3D).
+    raw = unquote(raw).strip()
+    try:
+        decoded = base64.b64decode(raw + "=" * (-len(raw) % 4)).decode("utf-8", errors="ignore")
+    except (binascii.Error, ValueError):
+        decoded = ""
+    return decoded.split(":::")
+
+
+def has_pending() -> bool:
+    """Diz se há um login iniciado e ainda dentro do prazo."""
+    pending = _load_pending()
+    if not pending:
+        return False
+    return time.time() - float(pending.get("created", 0)) <= LOGIN_TTL_SECONDS
 
 
 def _pending_file() -> Any:

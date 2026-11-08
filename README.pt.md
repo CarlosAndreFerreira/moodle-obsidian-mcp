@@ -61,6 +61,10 @@ moodle-mcp --install-handler     # Linux, macOS e Windows
 moodle-mcp --uninstall-handler
 ```
 
+O handler retira logo o URL dos seus argumentos de linha de comandos (que em Linux e
+macOS qualquer utilizador da máquina vê com `ps`) e passa-o por uma variável de
+ambiente, que só o dono do processo consegue ler.
+
 O mecanismo difere por sistema e o comando escolhe o certo: um ficheiro
 `.desktop` com `xdg-mime` em Linux, chaves em `HKEY_CURRENT_USER` em Windows
 (sem precisar de administrador), e um applet AppleScript com `CFBundleURLTypes`
