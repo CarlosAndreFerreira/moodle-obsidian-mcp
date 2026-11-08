@@ -32,6 +32,9 @@ Most MCP servers for third-party platforms pipe untrusted content straight into 
 - **Obsidian dashboard sync** — a central note with every course, progress, current grades and a sorted deadline calendar; one note per course with grade report, per-assignment submission status, assignment briefs converted to Markdown and the resource tree.
 - **What changed** — each sync compares with the previous one and writes a note (and `get_recent_changes` returns it, without calling Moodle): new grades, changed deadlines, new assignments and quizzes, new materials, new forum topics and topics with new replies.
 - **Deadlines everywhere** — a `.ics` calendar next to the dashboard (import or subscribe in Google Calendar, Outlook, Thunderbird or your phone; a reminder the day before), and an Obsidian Tasks list (`- [ ] … 📅 YYYY-MM-DD`) in the dashboard.
+- **Scheduled sync** — `moodle-mcp --schedule 6` syncs every 6 hours with the OS scheduler (systemd timer, launchd or Windows Task Scheduler), no MCP client running. `moodle-mcp --sync` runs one sync now.
+- **English or Portuguese notes** — `moodle-mcp --set language=en` switches the text of every generated note; folders stay put.
+- **MCP resources and prompts** — `moodle://changes`, `moodle://deadlines` and `moodle://dashboard` serve the last sync without calling Moodle; the `weekly_review`, `prepare_assignment` and `forum_catch_up` prompts are ready-made flows. The Vault tools return typed structured output (`outputSchema`).
 - **Course material download** — PDFs, slides and HTML pages saved into the vault, with each PDF converted to a searchable `.pdf.md` that agents can read (optional `[pdf]` extra).
 - **33 tools** across courses, books and pages, completion, grades, assignments and submissions, quizzes, forums (search, export to Obsidian, reply), messages and calendar.
 - **Multi-instance** — an open registry of Moodle instances; when more than one is configured, the `instance` parameter is exposed as an **enum in the schema**, so the model gets the valid names instead of free text.
@@ -90,7 +93,20 @@ The config directory follows the OS: `~/.config/moodle-mcp` (Linux), `~/Library/
 moodle-mcp --show-config      # where everything is read from, secrets redacted
 moodle-mcp --list-toolsets    # which tools each toolset exposes
 moodle-mcp --set sync_subdir=Moodle --set instances.utad.url=https://e-learning.utad.pt
+moodle-mcp --set language=en  # note text in English (default: pt)
 ```
+
+Note options: `language` (`pt`/`en`), `dashboard_name` (default: an existing `Doutoramento - Painel Moodle` note, else `Painel Moodle`/`Moodle Dashboard`), `courses_dir` (default `Unidades Curriculares`), `sync_subdir`.
+
+### Scheduled sync
+
+```bash
+moodle-mcp --sync                    # sync every instance with a token, now
+moodle-mcp --schedule 6              # every 6 hours (1–24); add --materials to download files too
+moodle-mcp --unschedule
+```
+
+The task runs `moodle-mcp --sync` and reads the same `config.toml` and `credentials.json`; no token goes into the task files or the command line. The scheduler doesn't see your shell or MCP client environment, so put the vault in `config.toml` (`moodle-mcp --set obsidian_vault_dir=…`) rather than only in the client's `env`. The result of the last run is in `last_sync.log`, in the config directory.
 
 ### Moodle instances
 
