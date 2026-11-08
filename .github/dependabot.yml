@@ -4,6 +4,12 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    ignore:
+      # O mcp 2.x renomeou o FastMCP para MCPServer e mudou outras APIs: é uma
+      # migração própria, não uma atualização automática. O pyproject.toml fixa
+      # mcp<2.0.0 até essa migração ser feita; as versões 1.x continuam a vir.
+      - dependency-name: mcp
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: github-actions
     directory: /
     schedule:
