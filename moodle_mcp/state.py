@@ -13,7 +13,11 @@ sincronizado entre computadores.
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
+import time
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +43,51 @@ def save(root: Path, instance: str, data: dict[str, Any]) -> None:
     path = state_file(root, instance)
     path.parent.mkdir(parents=True, exist_ok=True)
     config.atomic_write(path, json.dumps(data, indent=1, ensure_ascii=False, sort_keys=True) + "\n", 0o644)
+
+
+#: Um lock mais velho do que isto é de um processo que morreu a meio: é ignorado.
+LOCK_STALE_SECONDS = 120
+LOCK_WAIT_SECONDS = 30
+
+
+@contextlib.contextmanager
+def locked(root: Path, instance: str) -> Iterator[None]:
+    """Exclusão mútua entre processos à volta de um ler-alterar-gravar do estado.
+
+    Uma sincronização agendada pode correr ao mesmo tempo que uma pedida no
+    cliente MCP. Sem isto, as duas liam o estado, alteravam-no e gravavam, e a
+    última apagava o que a outra acabara de registar. O lock só envolve a
+    leitura e a gravação finais (segundos), nunca a sincronização inteira, e é
+    um ficheiro criado com `O_EXCL`, o que funciona igual em Linux, macOS e
+    Windows. Se não for possível obtê-lo em `LOCK_WAIT_SECONDS`, segue sem ele:
+    perder um registo obriga, no pior caso, a descarregar um ficheiro outra vez.
+    """
+    path = state_file(root, instance).with_suffix(".lock")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    deadline = time.monotonic() + LOCK_WAIT_SECONDS
+    acquired = False
+    while True:
+        try:
+            os.close(os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644))
+            acquired = True
+            break
+        except FileExistsError:
+            try:
+                if time.time() - path.stat().st_mtime > LOCK_STALE_SECONDS:
+                    path.unlink(missing_ok=True)
+                    continue
+            except OSError:
+                continue
+            if time.monotonic() > deadline:
+                break
+            time.sleep(0.1)
+        except OSError:
+            break
+    try:
+        yield
+    finally:
+        if acquired:
+            path.unlink(missing_ok=True)
 
 
 def file_key(fileurl: str) -> str:

@@ -50,6 +50,7 @@ from moodle_mcp import (
     ics,
     login,
     sanitize,
+    schedule,
     state,
     transport,
     vault,
@@ -1100,7 +1101,10 @@ def download_course_materials(
                             except Exception as e:
                                 errors.append({"file": fname, "error": str(e)})
 
-    state.save(root, instance, sync_state)
+    with state.locked(root, instance):  # outra sincronização pode ter gravado entretanto
+        latest = state.load(root, instance)
+        latest.setdefault("files", {}).update(files)
+        state.save(root, instance, latest)
     return {
         "course_id": course_id,
         "course_name": cname,
@@ -2252,6 +2256,40 @@ def sync_dashboard(
     # O que mudou desde a sincronização anterior (o estado é relido: o download
     # de materiais escreve no mesmo ficheiro durante a sincronização).
     root = vault.vault_root()
+    with state.locked(root, instance):
+        return _record_changes(
+            root,
+            instance,
+            target_dir,
+            changes_name,
+            snapshot,
+            now_str,
+            upcoming_items,
+            dashboard_file,
+            created_files,
+            errors,
+            fullname,
+            synced,
+            len(courses),
+        )
+
+
+def _record_changes(
+    root: Path,
+    instance: str,
+    target_dir: Path,
+    changes_name: str,
+    snapshot: dict[str, Any],
+    now_str: str,
+    upcoming_items: list[tuple[int, str, str, str, str, Any, str]],
+    dashboard_file: Path,
+    created_files: list[str],
+    errors: list[dict[str, str]],
+    fullname: str,
+    synced: int,
+    total: int,
+) -> dict[str, Any]:
+    """Compara com a sincronização anterior, escreve «O que mudou» e grava o estado (sob o lock)."""
     sync_state = state.load(root, instance)
     previous = sync_state.get("snapshot")
     found: list[dict[str, str]] | None = None
@@ -2279,7 +2317,7 @@ def sync_dashboard(
         "status": "ok" if not errors else "parcial",
         "student": fullname,
         "courses_synced": synced,
-        "courses_total": len(courses),
+        "courses_total": total,
         "files_written": created_files,
         "changes_count": len(found or []),
         "errors": errors,
@@ -2712,6 +2750,51 @@ def apply_toolsets(enabled: set[str]) -> list[str]:
     return sorted(removed)
 
 
+def run_sync(instance: str = "", materials: bool = False) -> int:
+    """Sincroniza sem cliente MCP (usado por `--sync` e pela tarefa agendada).
+
+    Escreve um resumo em `last_sync.log`, na pasta de configuração, para que
+    uma falha da tarefa agendada se possa ver sem abrir o journal do sistema.
+
+    Returns:
+        0 se tudo correu bem, 1 se alguma UC ou instância falhou.
+    """
+    names = [instance] if instance else [n for n, inst in config.instances().items() if inst.token]
+    if not names:
+        logger.error("Nenhuma instância com token. Faz `moodle-mcp --login` primeiro.")
+        return 1
+    status = 0
+    lines = []
+    for name in names:
+        stamp = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+        try:
+            result = sync_dashboard(instance=name, download_materials=materials)
+        except Exception as exc:  # registar e seguir para a instância seguinte
+            text = str(_redact_secrets(f"{type(exc).__name__}: {exc}"))
+            lines.append(f"[{stamp}] {name}: ERRO {text}")
+            status = 1
+            continue
+        if result.get("error"):
+            lines.append(
+                f"[{stamp}] {name}: ERRO {json.dumps(_redact_secrets(result.get('details')), default=str)[:500]}"
+            )
+            status = 1
+            continue
+        failed = len(result.get("errors", []))
+        status = status or (1 if failed else 0)
+        lines.append(
+            f"[{stamp}] {name}: {result['courses_synced']}/{result['courses_total']} UCs, "
+            f"{result['changes_count']} mudanças, {failed} erros"
+        )
+    for line in lines:
+        print(line)
+    try:
+        config.write_private(config.config_dir() / "last_sync.log", "\n".join(lines) + "\n")
+    except OSError:
+        logger.warning("Não foi possível escrever last_sync.log.", exc_info=True)
+    return status
+
+
 def main(argv: list[str] | None = None) -> int:
     """Ponto de entrada do servidor MCP.
 
@@ -2793,8 +2876,48 @@ def main(argv: list[str] | None = None) -> int:
             f"Chaves: {', '.join(config.SETTINGS)}, ou instances.<nome>.url para uma instância (https)."
         ),
     )
+    parser.add_argument(
+        "--sync",
+        nargs="?",
+        const="",
+        metavar="INSTÂNCIA",
+        help="Sincroniza o painel sem cliente MCP (todas as instâncias com token, ou só a indicada) e termina.",
+    )
+    parser.add_argument(
+        "--materials", action="store_true", help="Com --sync/--schedule: descarrega também os materiais."
+    )
+    parser.add_argument(
+        "--schedule",
+        nargs="?",
+        const=6,
+        type=int,
+        metavar="HORAS",
+        help="Agenda `--sync` no sistema (systemd, launchd ou Agendador de Tarefas) a cada HORAS (omissão 6).",
+    )
+    parser.add_argument(
+        "--unschedule", action="store_true", help="Remove a sincronização agendada e termina."
+    )
     parser.add_argument("--version", action="version", version=f"moodle-mcp {__version__}")
     args = parser.parse_args(argv)
+
+    if args.schedule is not None or args.unschedule:
+        try:
+            result = (
+                schedule.uninstall() if args.unschedule else schedule.install(args.schedule, args.materials)
+            )
+        except schedule.ScheduleError as exc:
+            parser.error(str(exc))
+        for key, value in result.items():
+            print(f"{key}: {', '.join(value) if isinstance(value, list) else value}")
+        if not args.unschedule:
+            print(
+                "\nA tarefa usa o Vault acima. Se não for o teu, grava-o com "
+                "`moodle-mcp --set obsidian_vault_dir=<pasta>` e volta a correr --schedule."
+            )
+        return 0
+
+    if args.sync is not None:
+        return run_sync(args.sync, args.materials)
 
     if args.install_handler or args.uninstall_handler:
         try:
