@@ -25,32 +25,29 @@ Servidor **Model Context Protocol (MCP)** em Python (`FastMCP`) desenhado para e
 
 ## 🚀 Instalação
 
-O pacote tem um entrypoint (`moodle-mcp`), pelo que a mesma linha serve em Linux,
-macOS e Windows e em qualquer cliente MCP.
+O pacote está no PyPI como [`moodle-obsidian-mcp`](https://pypi.org/project/moodle-obsidian-mcp/)
+e instala dois comandos, `moodle-mcp` e `moodle-mcp-token-catcher`, em Linux,
+macOS e Windows.
 
 ```bash
-uvx --from git+https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp moodle-mcp --show-config
+uv tool install "moodle-obsidian-mcp[pdf]"     # ou: pipx install "moodle-obsidian-mcp[pdf]"
+moodle-mcp --install-handler                    # uma vez: regista o handler moodlemobile://
+moodle-mcp --login                              # login pelo navegador (SSO incluído)
 ```
 
-Ou a partir de um clone:
+Para atualizar: `uv tool upgrade moodle-obsidian-mcp` (ou `pipx upgrade moodle-obsidian-mcp`).
+
+Usa uma instalação permanente (`uv tool` ou `pipx`) e não o `uvx`: o handler de
+login fica registado com o caminho do executável, e o `uvx` corre de uma cache
+que pode ser apagada. Para experimentar sem instalar:
 
 ```bash
-git clone git@github.com:CarlosAndreFerreira/moodle-obsidian-mcp.git
-cd moodle-obsidian-mcp
-uv pip install -e ".[pdf]"
+uvx --from moodle-obsidian-mcp moodle-mcp --show-config
 ```
 
-Para o handler `moodlemobile://` é preciso uma instalação permanente (o `uvx`
-corre de uma cache que pode ser apagada):
-
-```bash
-uv tool install "moodle-obsidian-mcp[pdf] @ git+https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp"
-```
-
-A partir de um clone, `./install.sh [caminho-do-vault]` faz a instalação permanente (`uv tool install`, ou `pipx`), define o Vault, regista o handler e indica o `moodle-mcp --login`.
-
-O pacote chama-se `moodle-obsidian-mcp` (o nome `moodle-mcp` está ocupado no
-PyPI); os comandos continuam a ser `moodle-mcp` e `moodle-mcp-token-catcher`.
+A partir de um clone, `./install.sh [caminho-do-vault]` faz a instalação
+permanente, define o Vault, regista o handler e indica o `moodle-mcp --login`.
+Para desenvolver: `git clone` e `uv pip install -e ".[dev,pdf]"`.
 
 O extra `[pdf]` acrescenta a extração de texto de PDFs via PyMuPDF. Fica de fora
 da instalação base porque o PyMuPDF é AGPL-3.0: sem ele, tudo o resto funciona e
@@ -66,8 +63,8 @@ moodle-mcp --uninstall-handler
 
 O mecanismo difere por sistema e o comando escolhe o certo: um ficheiro
 `.desktop` com `xdg-mime` em Linux, chaves em `HKEY_CURRENT_USER` em Windows
-(sem precisar de administrador), e um pacote `.app` com `CFBundleURLTypes`
-registado no Launch Services em macOS. Não precisa de privilégios elevados em
+(sem precisar de administrador), e um applet AppleScript com `CFBundleURLTypes`
+registado no Launch Services em macOS (é o que recebe o URL por Apple Event). Não precisa de privilégios elevados em
 nenhum deles.
 
 ### Configuração

@@ -4,18 +4,28 @@ build-backend = "hatchling.build"
 
 [project]
 name = "moodle-obsidian-mcp"
-version = "0.7.0"
-description = "Servidor MCP para Moodle (UAb/UTAD) com sincronização para o Obsidian"
+version = "0.7.1"
+description = "MCP server for Moodle with server-side prompt-injection defenses, SSO login and Obsidian vault sync"
 readme = "README.md"
 # tomllib é stdlib a partir do 3.11 e é o que lê o config.toml sem dependências.
 requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Carlos André Ferreira" }]
-keywords = ["mcp", "moodle", "obsidian", "model-context-protocol"]
+keywords = ["mcp", "mcp-server", "moodle", "obsidian", "model-context-protocol", "llm", "sso", "prompt-injection"]
 classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Intended Audience :: Education",
+  "Intended Audience :: End Users/Desktop",
+  "Operating System :: OS Independent",
   "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
   "Topic :: Education",
+  "Topic :: Education :: Computer Aided Instruction (CAI)",
 ]
 dependencies = [
   "mcp>=1.9.0,<2.0.0",
@@ -37,6 +47,11 @@ moodle-mcp-token-catcher = "moodle_mcp.token_catcher:cli"
 
 [project.urls]
 Homepage = "https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp"
+Repository = "https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp"
+Documentation = "https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp#readme"
+Issues = "https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp/issues"
+Changelog = "https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp/blob/main/CHANGELOG.md"
+Security = "https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp/security/policy"
 
 [tool.hatch.build.targets.wheel]
 packages = ["moodle_mcp"]
