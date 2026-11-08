@@ -40,7 +40,7 @@ from mcp.types import ToolAnnotations
 from pydantic import Field
 from urllib3.util import parse_url
 
-from moodle_mcp import __version__, config, confirm, handler, login, sanitize, transport, vault
+from moodle_mcp import __version__, config, confirm, handler, login, sanitize, state, transport, vault
 from moodle_mcp.transport import MoodleRequestError
 
 try:  # O PyMuPDF é AGPL-3.0 e fica no extra `[pdf]`; sem ele tudo o resto funciona.
@@ -1018,8 +1018,12 @@ def download_course_materials(
     base_uc_dir.mkdir(parents=True, exist_ok=True)
 
     downloaded: list[str] = []
+    skipped: list[str] = []
     errors: list[dict[str, str]] = []
     used: set[Path] = set()
+    root = vault.vault_root()
+    sync_state = state.load(root, instance)
+    files = sync_state.setdefault("files", {})
 
     for section in contents:
         sec_name = vault.safe_filename(section.get("name") or f"Topico_{section.get('section', 0)}")
@@ -1031,23 +1035,28 @@ def download_course_materials(
                 fname = vault.safe_filename(content_item.get("filename") or f"{mname}.bin")
                 furl = content_item.get("fileurl")
                 if ctype == "file" and furl:
+                    is_page = fname.lower().endswith((".html", ".htm"))
+                    if is_page:
+                        # Cada página do Moodle chama-se `index.html`: o nome útil é o do módulo.
+                        stem = mname if Path(fname).stem.lower() == "index" else Path(fname).stem
+                        dest = vault.unique_path(sec_dir / f"{vault.safe_filename(stem)}.md", used)
+                    else:
+                        dest = vault.unique_path(sec_dir / fname, used)
+                    if state.is_unchanged(files, furl, content_item, dest):
+                        skipped.append(str(dest))
+                        continue
                     try:
-                        if fname.lower().endswith((".html", ".htm")):
+                        if is_page:
                             r = transport.authed_get(furl, instance, timeout=30)
                             sec_dir.mkdir(parents=True, exist_ok=True)
-                            # Cada página do Moodle chama-se `index.html`: o nome útil é o do módulo.
-                            stem = mname if Path(fname).stem.lower() == "index" else Path(fname).stem
-                            md_dest = vault.unique_path(sec_dir / f"{vault.safe_filename(stem)}.md", used)
-                            vault.write_note(md_dest, f"# {mname}\n\n{vault.html_to_markdown(r.text)}\n")
-                            downloaded.append(str(md_dest))
+                            vault.write_note(dest, f"# {mname}\n\n{vault.html_to_markdown(r.text)}\n")
+                            downloaded.append(str(dest))
                         else:
                             res = download_moodle_file(
-                                furl,
-                                str(vault.unique_path(sec_dir / fname, used)),
-                                extract_pdf_to_markdown=extract_pdfs,
-                                instance=instance,
+                                furl, str(dest), extract_pdf_to_markdown=extract_pdfs, instance=instance
                             )
                             downloaded.append(res["downloaded_file"])
+                        state.remember(files, furl, content_item, dest, root)
                     except Exception as e:
                         errors.append({"file": fname, "error": str(e)})
 
@@ -1063,27 +1072,29 @@ def download_course_materials(
                         furl = att.get("fileurl")
                         fname = vault.safe_filename(att.get("filename", "enunciado.pdf"))
                         if furl:
+                            dest = vault.unique_path(
+                                efolios_dir / vault.safe_filename(f"{aname}_{fname}"), used
+                            )
+                            if state.is_unchanged(files, furl, att, dest):
+                                skipped.append(str(dest))
+                                continue
                             try:
                                 res = download_moodle_file(
-                                    furl,
-                                    str(
-                                        vault.unique_path(
-                                            efolios_dir / vault.safe_filename(f"{aname}_{fname}"), used
-                                        )
-                                    ),
-                                    extract_pdf_to_markdown=extract_pdfs,
-                                    instance=instance,
+                                    furl, str(dest), extract_pdf_to_markdown=extract_pdfs, instance=instance
                                 )
                                 downloaded.append(res["downloaded_file"])
+                                state.remember(files, furl, att, dest, root)
                             except Exception as e:
                                 errors.append({"file": fname, "error": str(e)})
 
+    state.save(root, instance, sync_state)
     return {
         "course_id": course_id,
         "course_name": cname,
         "materials_dir": str(base_uc_dir),
         "downloaded_count": len(downloaded),
         "downloaded_files": downloaded,
+        "unchanged_count": len(skipped),
         "errors": errors,
     }
 
@@ -1613,7 +1624,7 @@ def export_course_forums(
                 )
 
         fpath = vault.unique_path(foruns_dir / f"{fname}.md", used)
-        vault.write_note(fpath, "\n".join(lines))
+        vault.write_managed_note(fpath, "\n".join(lines))
         exported_files.append(str(fpath))
 
     return {
@@ -1945,7 +1956,7 @@ def _sync_course(
             uc_lines.append("")
 
     uc_file = uc_dir / uc_note_name
-    vault.write_note(uc_file, "\n".join(uc_lines))
+    vault.write_managed_note(uc_file, "\n".join(uc_lines))
     created_files.append(str(uc_file))
 
     for wanted, extra, label in (
@@ -2143,7 +2154,7 @@ def sync_dashboard(
     if on_progress:
         on_progress(len(courses), len(courses), "painel")
     dashboard_file = target_dir / f"{dashboard}.md"
-    vault.write_note(dashboard_file, "\n".join(dashboard_lines) + "\n")
+    vault.write_managed_note(dashboard_file, "\n".join(dashboard_lines) + "\n")
     created_files.insert(0, str(dashboard_file))
 
     return {

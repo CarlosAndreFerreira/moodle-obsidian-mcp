@@ -12,6 +12,7 @@ import html
 import json
 import os
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -124,6 +125,114 @@ def write_note(path: Path, markdown: str) -> None:
     quando o estudante abre a nota.
     """
     config.atomic_write(path, sanitize.neutralize_markdown(markdown), 0o644)
+
+
+# ==============================================================================
+# NOTAS COM BLOCO GERIDO
+#
+# A sincronização reescrevia as notas por inteiro: qualquer coisa que o
+# estudante escrevesse numa nota de UC desaparecia na sincronização seguinte.
+# Agora só o que está entre os marcadores é da sincronização; o resto da nota
+# (e as propriedades do frontmatter que não são geradas) é do estudante.
+# ==============================================================================
+
+MANAGED_START = "%% moodle-mcp:start — o conteúdo até moodle-mcp:end é substituído em cada sincronização %%"
+MANAGED_END = "%% moodle-mcp:end %%"
+_START_RE = re.compile(r"^%% moodle-mcp:start\b.*%%[ \t]*$", re.MULTILINE)
+_END_RE = re.compile(r"^%% moodle-mcp:end %%[ \t]*$", re.MULTILINE)
+_KEY_RE = re.compile(r"^([A-Za-z0-9_][\w.-]*)\s*:")
+
+#: Texto inicial da parte do estudante numa nota nova.
+USER_SECTION = "\n%% Escreve à vontade abaixo desta linha: a sincronização não altera esta parte. %%\n"
+
+
+def _split_frontmatter(text: str) -> tuple[list[str], str]:
+    """Separa o frontmatter YAML (linhas, sem os `---`) do resto da nota."""
+    if not text.startswith("---\n"):
+        return [], text
+    end = text.find("\n---\n", 4)
+    if end == -1:
+        return [], text
+    return text[4:end].split("\n"), text[end + 5 :]
+
+
+def _frontmatter_blocks(lines: list[str]) -> list[tuple[str | None, list[str]]]:
+    """Agrupa as linhas por propriedade de topo (a linha da chave e as que a continuam)."""
+    blocks: list[tuple[str | None, list[str]]] = []
+    for line in lines:
+        match = _KEY_RE.match(line)
+        if match or not blocks:
+            blocks.append((match.group(1) if match else None, [line]))
+        else:
+            blocks[-1][1].append(line)
+    return blocks
+
+
+def _merge_frontmatter(generated: list[str], existing: list[str]) -> list[str]:
+    """Propriedades geradas atualizadas; as que o estudante acrescentou ficam."""
+    ours = _frontmatter_blocks(generated)
+    our_keys = {key for key, _ in ours if key}
+    merged = [line for _, block in ours for line in block]
+    for key, block in _frontmatter_blocks(existing):
+        if key is None or key not in our_keys:
+            merged.extend(block)
+    return merged
+
+
+def _backup(path: Path, text: str) -> Path:
+    """Guarda uma cópia de uma nota antes da primeira reescrita com bloco gerido."""
+    root = vault_root()
+    try:
+        relative = path.resolve().relative_to(root)
+    except ValueError:
+        relative = Path(path.name)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    target = root / ".moodle-mcp" / "backup" / relative.parent / f"{relative.stem}.{stamp}{relative.suffix}"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    config.atomic_write(target, text, 0o644)
+    return target
+
+
+def write_managed_note(path: Path, markdown: str) -> Path | None:
+    """Escreve uma nota gerada sem apagar o que o estudante lá escreveu.
+
+    O texto gerado (já sem conteúdo ativo do Obsidian) vai entre `MANAGED_START`
+    e `MANAGED_END`. Numa nota que já tem os marcadores, só essa parte muda; o
+    resto, incluindo propriedades do frontmatter que não são geradas, fica.
+    Uma nota que existe mas não tem marcadores (gerada por uma versão anterior,
+    eventualmente editada à mão) é primeiro copiada para
+    `.moodle-mcp/backup/` dentro do Vault, e só depois reescrita.
+
+    Args:
+        path: Caminho da nota, dentro do Vault.
+        markdown: O conteúdo gerado, com ou sem frontmatter.
+
+    Returns:
+        O caminho da cópia de segurança, se tiver sido feita.
+
+    """
+    generated_fm, generated_body = _split_frontmatter(sanitize.neutralize_markdown(markdown))
+    block = f"{MANAGED_START}\n{generated_body.strip()}\n{MANAGED_END}\n"
+    backup: Path | None = None
+    before, after = "", USER_SECTION
+    existing_fm: list[str] = []
+
+    if path.exists():
+        current = path.read_text(encoding="utf-8")
+        existing_fm, existing_body = _split_frontmatter(current)
+        start, end = _START_RE.search(existing_body), _END_RE.search(existing_body)
+        if start and end and start.start() < end.start():
+            before = existing_body[: start.start()]
+            after = existing_body[end.end() :].lstrip("\n")
+            after = "\n" + after if after else ""
+        else:
+            backup = _backup(path, current)
+            existing_fm = []
+
+    frontmatter = _merge_frontmatter(generated_fm, existing_fm)
+    head = "---\n" + "\n".join(frontmatter) + "\n---\n" if frontmatter else ""
+    config.atomic_write(path, head + before + block + after, 0o644)
+    return backup
 
 
 _WINDOWS_RESERVED = frozenset(

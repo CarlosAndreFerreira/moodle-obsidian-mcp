@@ -60,6 +60,8 @@ The `[pdf]` extra adds PDF text extraction via PyMuPDF. It's kept out of the bas
 
 ## Reliability
 
+- **Your notes are yours.** Generated content lives between `%% moodle-mcp:start %%` and `%% moodle-mcp:end %%`; anything you write outside that block, and any frontmatter properties you add, survive every sync. A note from an older version (without the markers) is copied to `.moodle-mcp/backup/` in the vault before its first rewrite.
+- **Incremental downloads.** Each file's `timemodified` and size are recorded in `.moodle-mcp/state-<instance>.json` in the vault; files that haven't changed in Moodle and are still in the vault aren't downloaded again.
 - **One failing course doesn't stop a sync.** Each course syncs independently; a section Moodle refuses (quizzes, choices, grades) is left empty and reported in `errors` with `status: "partial"`. Only a missing or invalid token stops everything, with instructions to log in again.
 - **Moodle errors arrive as errors** (`isError` in MCP), with the cause and what to do, instead of being disguised as results.
 - **Nothing is overwritten by accident:** files, pages, forums and courses with the same name get ` (2)`, ` (3)`…; filenames are valid on Windows, macOS and Linux.

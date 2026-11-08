@@ -172,6 +172,14 @@ um cliente as pode auto-aprovar sem auto-aprovar nada irreversível.
 
 ### Fiabilidade
 
+* **As tuas notas são tuas.** O conteúdo gerado fica entre `%% moodle-mcp:start %%`
+  e `%% moodle-mcp:end %%`; o que escreves fora desse bloco, e as propriedades que
+  acrescentas ao frontmatter, sobrevivem a todas as sincronizações. Uma nota de
+  uma versão anterior (sem os marcadores) é copiada para `.moodle-mcp/backup/`,
+  dentro do Vault, antes de ser reescrita pela primeira vez.
+* **Downloads incrementais.** O `timemodified` e o tamanho de cada ficheiro ficam
+  em `.moodle-mcp/state-<instância>.json`, no Vault; um ficheiro que não mudou no
+  Moodle e ainda está no Vault não volta a ser descarregado.
 * **A sincronização não pára por causa de uma UC.** Cada disciplina é
   sincronizada à parte; uma secção que o Moodle recuse (testes, escolhas, notas)
   fica vazia e o problema aparece em `errors`, com `status: "parcial"`. Só um
