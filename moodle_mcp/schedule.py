@@ -31,7 +31,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from moodle_mcp import config
+from moodle_mcp import config, vault
 
 NAME = "moodle-mcp-sync"
 LAUNCHD_LABEL = "io.github.carlosandreferreira.moodle-mcp-sync"
@@ -141,6 +141,34 @@ def _schtasks_command(materials: bool) -> str:
     return " ".join(f'"{part}"' if " " in part or not part else part for part in sync_command(materials))
 
 
+def preflight() -> tuple[Path, list[str]]:
+    """Confirma que a tarefa agendada vai encontrar o Vault e pelo menos um token.
+
+    O agendador não vê o ambiente do cliente MCP. Quem só tem o Vault ou as
+    instâncias no `env` do cliente ficava com uma tarefa que escrevia numa
+    pasta errada, ou que falhava em silêncio a cada execução.
+
+    Returns:
+        A raiz do Vault e os nomes das instâncias com token.
+
+    Raises:
+        ScheduleError: Se o Vault não existir ou nenhuma instância tiver token.
+
+    """
+    root = vault.vault_root()
+    if not root.is_dir():
+        raise ScheduleError(
+            f"O Vault {root} não existe. Grava o caminho certo com "
+            "`moodle-mcp --set obsidian_vault_dir=<pasta>` (o agendador não vê o env do cliente MCP)."
+        )
+    ready = sorted(name for name, inst in config.instances().items() if inst.token)
+    if not ready:
+        raise ScheduleError(
+            "Nenhuma instância com token no config.toml/credentials.json. Faz `moodle-mcp --login` primeiro."
+        )
+    return root, ready
+
+
 def install(
     hours: int = 6, materials: bool = False, platform: str = sys.platform, run: Runner = _run
 ) -> dict[str, Any]:
@@ -162,10 +190,12 @@ def install(
     if not 1 <= int(hours) <= 24:
         raise ScheduleError("O intervalo tem de estar entre 1 e 24 horas.")
     hours = int(hours)
+    root, ready = preflight()
     summary: dict[str, Any] = {
         "command": " ".join(sync_command(materials)),
         "every_hours": hours,
-        "vault": config.get("obsidian_vault_dir"),
+        "vault": str(root),
+        "instances": ready,
     }
     try:
         if platform.startswith("linux"):
@@ -184,17 +214,15 @@ def install(
             plist = _launchd_file()
             plist.parent.mkdir(parents=True, exist_ok=True)
             domain = f"gui/{os.getuid()}"  # type: ignore[attr-defined,unused-ignore]
-            run(["launchctl", "bootout", domain, str(plist)]) if plist.exists() else None
+            if plist.exists():  # pode já não estar carregado: um erro aqui não impede repetir
+                _quiet(run, ["launchctl", "bootout", domain, str(plist)])
             plist.write_bytes(launchd_plist(hours, materials))
             run(["launchctl", "bootstrap", domain, str(plist)])
             summary.update(files=[str(plist)], check=f"launchctl print {domain}/{LAUNCHD_LABEL}")
         elif platform == "win32":
-            run(
-                [
-                    "schtasks", "/Create", "/F", "/TN", NAME, "/SC", "HOURLY", "/MO", str(hours),
-                    "/TR", _schtasks_command(materials),
-                ]
-            )  # fmt: skip
+            # `/SC HOURLY` só aceita `/MO` de 1 a 23; 24 horas é uma vez por dia, de manhã.
+            every = ["/SC", "DAILY", "/ST", "07:15"] if hours >= 24 else ["/SC", "HOURLY", "/MO", str(hours)]
+            run(["schtasks", "/Create", "/F", "/TN", NAME, *every, "/TR", _schtasks_command(materials)])
             summary.update(files=[], check=f"schtasks /Query /TN {NAME}")
         else:
             raise ScheduleError(f"Sistema não suportado: {platform}. Agenda `moodle-mcp --sync` à mão.")

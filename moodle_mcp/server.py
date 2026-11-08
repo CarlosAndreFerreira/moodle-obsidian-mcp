@@ -1850,7 +1850,10 @@ def _sync_course(
         iname = gi.get("itemname") or (
             total_label if gi.get("itemtype") == "course" else i18n.t("course.item")
         )
-        snap["grades"][str(iname)] = str(gi.get("gradeformatted") or "—")
+        # Chave estável no retrato: com a etiqueta traduzida, mudar de língua
+        # parecia uma nota nova em cada UC.
+        key = gi.get("itemname") or (changes.COURSE_TOTAL_KEY if gi.get("itemtype") == "course" else "Item")
+        snap["grades"][str(key)] = str(gi.get("gradeformatted") or "—")
         gval = gi.get("gradeformatted") or "—"
         gmin = gi.get("grademin", "")
         gmax = gi.get("grademax", "")
@@ -2759,6 +2762,13 @@ def run_sync(instance: str = "", materials: bool = False) -> int:
     Returns:
         0 se tudo correu bem, 1 se alguma UC ou instância falhou.
     """
+    if not vault.vault_root().is_dir():
+        # Sem isto, um Vault mal configurado (p.ex. só no env do cliente MCP) fazia
+        # a tarefa agendada criar e encher uma pasta que o estudante nunca abre.
+        logger.error(
+            "O Vault %s não existe; não sincronizo. Ver `moodle-mcp --show-config`.", vault.vault_root()
+        )
+        return 1
     names = [instance] if instance else [n for n, inst in config.instances().items() if inst.token]
     if not names:
         logger.error("Nenhuma instância com token. Faz `moodle-mcp --login` primeiro.")

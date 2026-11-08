@@ -287,3 +287,27 @@ def test_courses_dir_and_dashboard_name_settings(evolving_moodle, vault, monkeyp
     server.sync_dashboard(instance="test")
     assert (vault / "Courses" / "Ética.md").exists()
     assert "[[Courses/Ética\\|" in (vault / "Início.md").read_text(encoding="utf-8")
+
+
+def test_switching_language_reports_no_false_changes(evolving_moodle, vault, monkeypatch):
+    def call(wsfunction, params=None, method="POST", instance="test"):
+        if wsfunction == "core_webservice_get_site_info":
+            return {"userid": 1, "fullname": "Aluno"}
+        return {}
+
+    monkeypatch.setattr(server, "_moodle_call", call)
+    monkeypatch.setattr(
+        server,
+        "get_course_grades",
+        lambda *a, **k: {"usergrades": [{"gradeitems": [{"itemtype": "course", "gradeformatted": "14"}]}]},
+    )
+    server.sync_dashboard(instance="test")
+    monkeypatch.setenv("MOODLE_MCP_LANGUAGE", "en")
+    assert server.sync_dashboard(instance="test")["changes_count"] == 0
+
+
+def test_course_total_change_is_shown_translated(monkeypatch):
+    before = {"1": {"name": "Ética", "grades": {changes.COURSE_TOTAL_KEY: "—"}}}
+    after = {"1": {"name": "Ética", "grades": {changes.COURSE_TOTAL_KEY: "15"}}}
+    monkeypatch.setenv("MOODLE_MCP_LANGUAGE", "en")
+    assert changes.diff(before, after)[0]["text"] == "Course total: 15"

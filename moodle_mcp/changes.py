@@ -18,6 +18,8 @@ from moodle_mcp.i18n import t
 #: Módulos que não são conteúdo (texto solto na página da UC).
 _IGNORED_MODULES = frozenset({"label"})
 _EMPTY_GRADES = frozenset({"", "-", "—"})
+#: Chave do total da UC no retrato (a das versões anteriores, para continuar a comparar).
+COURSE_TOTAL_KEY = "Total da Disciplina"
 
 
 def _when(ts: Any) -> str:
@@ -56,7 +58,8 @@ def diff(previous: dict[str, Any], current: dict[str, Any]) -> list[dict[str, st
             old = before.get("grades", {}).get(item)
             if grade not in _EMPTY_GRADES and grade != old:
                 before_text = t("changes.grade_before", old=old) if old not in (None, *_EMPTY_GRADES) else ""
-                add(name, "nota", t("changes.grade", item=item, grade=grade) + before_text)
+                label = t("course.total") if item == COURSE_TOTAL_KEY else item
+                add(name, "nota", t("changes.grade", item=label, grade=grade) + before_text)
 
         for aid, task in now.get("assignments", {}).items():
             old = before.get("assignments", {}).get(aid)

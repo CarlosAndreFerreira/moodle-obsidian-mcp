@@ -1,6 +1,7 @@
 """Sincronização sem cliente (`--sync`) e agendada (`--schedule`), e o lock do estado."""
 
 import plistlib
+import subprocess
 import threading
 import time
 
@@ -11,7 +12,7 @@ from moodle_mcp import schedule, server, state
 
 
 @pytest.fixture
-def sched(tmp_path, monkeypatch, cfg_dir):
+def sched(tmp_path, monkeypatch, cfg_dir, vault):
     calls = []
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
     monkeypatch.setattr(schedule, "_launchd_file", lambda: tmp_path / "LaunchAgents" / "x.plist")
@@ -27,7 +28,7 @@ def _recorder(calls):
 
 def test_linux_timer_is_written_and_enabled_without_secrets(sched, monkeypatch):
     calls, tmp = sched
-    monkeypatch.setenv("OBSIDIAN_VAULT_DIR", "/home/eu/Vault 100%")
+    monkeypatch.setenv("OBSIDIAN_VAULT_DIR", "/home/eu/Vault 100%")  # só copiado para a unit
     summary = schedule.install(6, materials=True, platform="linux", run=_recorder(calls))
 
     folder = tmp / "xdg" / "systemd" / "user"
@@ -81,7 +82,7 @@ def test_cli_rejects_bad_interval(sched):
     assert info.value.code == 2
 
 
-def test_run_sync_writes_a_log_and_returns_status(cfg_dir, monkeypatch, capsys):
+def test_run_sync_writes_a_log_and_returns_status(cfg_dir, vault, monkeypatch, capsys):
     results = iter(
         [
             {"courses_synced": 2, "courses_total": 2, "changes_count": 3, "errors": []},
@@ -94,13 +95,57 @@ def test_run_sync_writes_a_log_and_returns_status(cfg_dir, monkeypatch, capsys):
     assert server.run_sync("test") == 1
 
 
-def test_run_sync_survives_an_exception(cfg_dir, monkeypatch):
+def test_run_sync_survives_an_exception(cfg_dir, vault, monkeypatch):
     def boom(**kwargs):
         raise RuntimeError("Moodle em baixo")
 
     monkeypatch.setattr(server, "sync_dashboard", boom)
     assert server.run_sync("test") == 1
     assert "ERRO RuntimeError: Moodle em baixo" in (cfg_dir / "last_sync.log").read_text(encoding="utf-8")
+
+
+def test_macos_reschedule_survives_an_unloaded_agent(sched):
+    calls, tmp = sched
+    schedule.install(6, platform="darwin", run=_recorder(calls))
+
+    def run(argv):
+        if argv[1] == "bootout":  # o agente já não estava carregado
+            raise subprocess.CalledProcessError(5, argv)
+        calls.append(argv)
+
+    schedule.install(6, platform="darwin", run=run)
+    assert calls[-1][:2] == ["launchctl", "bootstrap"]
+
+
+def test_windows_daily_task_for_24_hours(sched):
+    calls, _tmp = sched
+    schedule.install(24, platform="win32", run=_recorder(calls))
+    argv = calls[-1]
+    assert argv[argv.index("/SC") + 1] == "DAILY" and "/MO" not in argv
+
+
+def test_schedule_refuses_a_missing_vault(sched, monkeypatch, tmp_path):
+    from moodle_mcp import vault as vaultlib
+
+    monkeypatch.setattr(vaultlib, "OBSIDIAN_VAULT_DIR", str(tmp_path / "nao-existe"))
+    with pytest.raises(schedule.ScheduleError, match="não existe"):
+        schedule.install(6, platform="linux", run=lambda argv: None)
+
+
+def test_schedule_refuses_when_no_instance_has_a_token(sched, monkeypatch):
+    monkeypatch.setattr(schedule.config, "instances", lambda: {})
+    with pytest.raises(schedule.ScheduleError, match="--login"):
+        schedule.install(6, platform="linux", run=lambda argv: None)
+
+
+def test_run_sync_does_not_create_a_missing_vault(cfg_dir, monkeypatch, tmp_path):
+    from moodle_mcp import vault as vaultlib
+
+    missing = tmp_path / "nao-existe"
+    monkeypatch.setattr(vaultlib, "OBSIDIAN_VAULT_DIR", str(missing))
+    monkeypatch.setattr(server, "sync_dashboard", lambda **k: pytest.fail("não devia sincronizar"))
+    assert server.run_sync("test") == 1
+    assert not missing.exists()
 
 
 # ------------------------------------------------------------------------------

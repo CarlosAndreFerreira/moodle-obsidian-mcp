@@ -26,6 +26,13 @@ LANGUAGES = ("pt", "en")
 
 _TEXTS: dict[str, dict[str, str]] = {
     "pt": {
+        # Marcadores do bloco gerido (a deteção só usa `moodle-mcp:start` / `moodle-mcp:end`)
+        "vault.managed_start": (
+            "%% moodle-mcp:start — o conteúdo até moodle-mcp:end é substituído em cada sincronização %%"
+        ),
+        "vault.user_section": (
+            "\n%% Escreve à vontade abaixo desta linha: a sincronização não altera esta parte. %%\n"
+        ),
         # Painel
         "dashboard.default_name": "Painel Moodle",
         "dashboard.title": "Painel Moodle ({instance})",
@@ -131,6 +138,10 @@ _TEXTS: dict[str, dict[str, str]] = {
         ),
     },
     "en": {
+        "vault.managed_start": (
+            "%% moodle-mcp:start — everything up to moodle-mcp:end is replaced on each sync %%"
+        ),
+        "vault.user_section": "\n%% Write freely below this line: syncing never changes this part. %%\n",
         "dashboard.default_name": "Moodle Dashboard",
         "dashboard.title": "Moodle Dashboard ({instance})",
         "dashboard.heading": "🎓 Academic Dashboard ({base_url})",
