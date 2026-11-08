@@ -11,6 +11,8 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
+from moodle_mcp.i18n import t
+
 PRODID = "-//moodle-obsidian-mcp//prazos//PT"
 
 
@@ -64,11 +66,12 @@ def build(items: list[tuple[int, str, str, str, str, Any, str]], instance: str, 
         "VERSION:2.0",
         f"PRODID:{PRODID}",
         "CALSCALE:GREGORIAN",
-        f"X-WR-CALNAME:{_escape(f'Prazos Moodle ({instance})')}",
+        f"X-WR-CALNAME:{_escape(t('ics.calname', instance=instance))}",
     ]
     for due_ts, _due_str, course, activity, kind, ref_id, status in sorted(items, key=lambda x: x[0]):
         if not due_ts:
             continue
+        label = t("kind." + kind)
         lines += [
             "BEGIN:VEVENT",
             f"UID:{_escape(f'{instance}-{kind}-{ref_id}')}@moodle-obsidian-mcp",
@@ -76,11 +79,11 @@ def build(items: list[tuple[int, str, str, str, str, Any, str]], instance: str, 
             f"DTSTART:{_stamp(int(due_ts))}",
             "DURATION:PT0M",
             f"SUMMARY:{_escape(f'{activity} ({course})')}",
-            f"DESCRIPTION:{_escape(f'{kind} · estado: {status} · {base_url}')}",
-            f"CATEGORIES:{_escape(kind)}",
+            f"DESCRIPTION:{_escape(t('ics.description', kind=label, status=status, base_url=base_url))}",
+            f"CATEGORIES:{_escape(label)}",
             "BEGIN:VALARM",
             "ACTION:DISPLAY",
-            f"DESCRIPTION:{_escape(f'Prazo amanhã: {activity}')}",
+            f"DESCRIPTION:{_escape(t('ics.alarm', activity=activity))}",
             "TRIGGER:-P1D",
             "END:VALARM",
             "END:VEVENT",

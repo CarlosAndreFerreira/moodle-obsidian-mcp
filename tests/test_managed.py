@@ -107,11 +107,11 @@ def test_sync_keeps_what_the_student_wrote(vault, monkeypatch):
     monkeypatch.setattr(server, "get_course_contents", lambda *a, **k: [])
 
     server.sync_dashboard(instance="test")
-    for path in (vault / "Unidades Curriculares" / "UC.md", vault / "Doutoramento - Painel Moodle.md"):
+    for path in (vault / "Unidades Curriculares" / "UC.md", vault / "Painel Moodle.md"):
         path.write_text(path.read_text(encoding="utf-8") + "\nNOTA PESSOAL\n", encoding="utf-8")
     server.sync_dashboard(instance="test")
 
-    for path in (vault / "Unidades Curriculares" / "UC.md", vault / "Doutoramento - Painel Moodle.md"):
+    for path in (vault / "Unidades Curriculares" / "UC.md", vault / "Painel Moodle.md"):
         assert "NOTA PESSOAL" in path.read_text(encoding="utf-8"), path.name
 
 

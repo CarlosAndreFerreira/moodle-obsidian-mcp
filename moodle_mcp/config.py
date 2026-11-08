@@ -68,7 +68,13 @@ SETTINGS: dict[str, tuple[str, str]] = {
     # Subpasta do Vault para o painel e "Unidades Curriculares" (vazio = raiz).
     "sync_subdir": ("MOODLE_MCP_SYNC_SUBDIR", ""),
     # Nome da nota do painel (sem .md); com várias instâncias ganha " (<instância>)".
-    "dashboard_name": ("MOODLE_MCP_DASHBOARD_NAME", "Doutoramento - Painel Moodle"),
+    # Vazio: mantém a nota "Doutoramento - Painel Moodle" de instalações antigas
+    # se já existir; senão "Painel Moodle" / "Moodle Dashboard", conforme a língua.
+    "dashboard_name": ("MOODLE_MCP_DASHBOARD_NAME", ""),
+    # Língua do texto das notas geradas: pt | en (ver `moodle_mcp.i18n`).
+    "language": ("MOODLE_MCP_LANGUAGE", "pt"),
+    # Pasta das notas das UCs, dentro da pasta de sincronização.
+    "courses_dir": ("MOODLE_MCP_COURSES_DIR", "Unidades Curriculares"),
 }
 
 #: Opções secretas, guardadas em `credentials.json` em vez de `config.toml`.

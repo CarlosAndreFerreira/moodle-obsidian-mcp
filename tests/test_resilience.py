@@ -265,10 +265,10 @@ def small_moodle(monkeypatch, vault):
 def test_sync_subdir_moves_everything_and_links_follow(small_moodle, vault, monkeypatch):
     monkeypatch.setenv("MOODLE_MCP_SYNC_SUBDIR", "Moodle")
     server.sync_dashboard(instance="test")
-    dashboard = (vault / "Moodle" / "Doutoramento - Painel Moodle.md").read_text(encoding="utf-8")
+    dashboard = (vault / "Moodle" / "Painel Moodle.md").read_text(encoding="utf-8")
     assert "[[Moodle/Unidades Curriculares/Ética\\|Abrir UC]]" in dashboard
     note = (vault / "Moodle" / "Unidades Curriculares" / "Ética.md").read_text(encoding="utf-8")
-    assert "[[Moodle/Doutoramento - Painel Moodle\\|" in note
+    assert "[[Moodle/Painel Moodle\\|" in note
     assert not (vault / "Unidades Curriculares").exists()
 
 

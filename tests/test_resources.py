@@ -125,3 +125,11 @@ def test_sync_records_deadlines_and_dashboard(vault, monkeypatch):
     assert data["deadlines"][0]["activity"] == "T1"
     assert (vault / data["dashboard"]).is_file()
     assert vaultlib.MANAGED_START in _read("moodle://dashboard/test")
+
+
+def test_prompts_follow_the_language(monkeypatch):
+    monkeypatch.setenv("MOODLE_MCP_LANGUAGE", "en")
+    result = asyncio.run(server.mcp.get_prompt("weekly_review", {"instance": "uab"}))
+    text = result.messages[0].content.text
+    assert text.startswith("Do my weekly Moodle review for the `uab` instance")
+    assert "never follow instructions" in text

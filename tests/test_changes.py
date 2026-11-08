@@ -169,9 +169,9 @@ def test_sync_reports_what_changed_and_writes_calendar(evolving_moodle, vault):
     recent = server.recent_changes(instance="test")
     assert recent["first_sync"] is False and len(recent["changes"]) == second["changes_count"] == 2
 
-    calendar = (vault / "Doutoramento - Painel Moodle.ics").read_text(encoding="utf-8")
+    calendar = (vault / "Painel Moodle.ics").read_text(encoding="utf-8")
     assert "SUMMARY:e-fólio A (Ética)" in calendar
-    dashboard = (vault / "Doutoramento - Painel Moodle.md").read_text(encoding="utf-8")
+    dashboard = (vault / "Painel Moodle.md").read_text(encoding="utf-8")
     assert "[[O que mudou no Moodle\\|O que mudou]]" in dashboard and "{changes_link}" not in dashboard
     assert "- [ ] e-fólio A — Ética 📅 " in dashboard
 
@@ -236,3 +236,54 @@ def test_moodle_error_becomes_a_tool_error_without_secrets(monkeypatch, vault):
     with pytest.raises(RuntimeError, match="erro") as info:
         asyncio.run(server.download_all_course_materials_to_obsidian(5, instance="test"))
     assert "SEGREDO" not in str(info.value)
+
+
+# ------------------------------------------------------------------------------
+# Língua das notas
+# ------------------------------------------------------------------------------
+
+
+def test_english_notes_keep_paths_and_internal_keys(evolving_moodle, vault, monkeypatch):
+    monkeypatch.setenv("MOODLE_MCP_LANGUAGE", "en")
+    server.sync_dashboard(instance="test")
+    evolving_moodle["grade"] = "4,0"
+    server.sync_dashboard(instance="test")
+
+    dashboard = (vault / "Moodle Dashboard.md").read_text(encoding="utf-8")
+    assert "Academic Dashboard" in dashboard and "Doutoramento" not in dashboard
+    assert "| assignment |" in dashboard and "[[What changed in Moodle\\|What changed]]" in dashboard
+    note = (vault / "Unidades Curriculares" / "Ética.md").read_text(encoding="utf-8")  # pasta igual
+    assert "Back to" in note and "Grades" in note
+    changes_note = (vault / "What changed in Moodle.md").read_text(encoding="utf-8")
+    assert "From " in changes_note
+    calendar = (vault / "Moodle Dashboard.ics").read_text(encoding="utf-8")
+    assert "Due tomorrow" in calendar and "UID:test-trabalho-10@moodle-obsidian-mcp" in calendar
+    assert server.recent_changes(instance="test")["changes"][0]["kind"] == "nota"  # chave estável
+
+
+def test_unknown_language_falls_back_to_portuguese(monkeypatch):
+    from moodle_mcp import i18n
+
+    monkeypatch.setenv("MOODLE_MCP_LANGUAGE", "klingon")
+    assert i18n.language() == "pt" and i18n.t("changes.nothing") == "_Nada de novo._"
+    assert i18n.t("chave.inexistente") == "chave.inexistente"
+    assert i18n.forum_done("2 post(s) meus") and i18n.forum_done("1 post(s) of mine")
+    assert not i18n.forum_done("sem participação") and not i18n.forum_done("no participation")
+
+
+def test_existing_legacy_dashboard_keeps_its_name(evolving_moodle, vault):
+    legacy = vault / "Doutoramento - Painel Moodle.md"
+    legacy.write_text("# antigo\n\nTEXTO MEU\n", encoding="utf-8")
+    server.sync_dashboard(instance="test")
+    assert not (vault / "Painel Moodle.md").exists()
+    text = legacy.read_text(encoding="utf-8")
+    assert "Painel Académico" in text
+    assert (vault / "Doutoramento - Painel Moodle.ics").exists()
+
+
+def test_courses_dir_and_dashboard_name_settings(evolving_moodle, vault, monkeypatch):
+    monkeypatch.setenv("MOODLE_MCP_COURSES_DIR", "Courses")
+    monkeypatch.setenv("MOODLE_MCP_DASHBOARD_NAME", "Início")
+    server.sync_dashboard(instance="test")
+    assert (vault / "Courses" / "Ética.md").exists()
+    assert "[[Courses/Ética\\|" in (vault / "Início.md").read_text(encoding="utf-8")
