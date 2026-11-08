@@ -4,6 +4,17 @@ Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-PT/1.1.0/);
 o projeto segue [versionamento semântico](https://semver.org/lang/pt/) (antes da
 1.0, uma versão menor pode mudar comportamento).
 
+## [0.8.1] — 2026-11-08
+
+### Adicionado
+- `server.json` para o [MCP Registry](https://registry.modelcontextprotocol.io)
+  (`io.github.CarlosAndreFerreira/moodle-obsidian-mcp`) e a marca `mcp-name`
+  no README, que o Registry usa para confirmar que o pacote do PyPI é deste
+  repositório.
+- Comando `moodle-obsidian-mcp`, igual a `moodle-mcp`: os clientes do Registry
+  correm `uvx moodle-obsidian-mcp`, que antes falhava por não haver um comando
+  com o nome do pacote.
+
 ## [0.8.0] — 2026-11-08
 
 ### Adicionado
@@ -199,6 +210,7 @@ o projeto segue [versionamento semântico](https://semver.org/lang/pt/) (antes d
 - `set_moodle_token` valida antes de gravar e não muda o URL de uma instância.
 - As ferramentas que gravam credenciais (`auth`) ficam desligadas por omissão.
 
+[0.8.1]: https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp/compare/v0.7.2...v0.8.0
 [0.7.2]: https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp/compare/v0.7.0...v0.7.1

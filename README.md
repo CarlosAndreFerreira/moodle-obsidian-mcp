@@ -10,6 +10,8 @@ A **Model Context Protocol** server that gives AI assistants (Claude, opencode, 
 
 Works with any Moodle that has Web Services and the mobile app service enabled — **including universities behind federated SSO** (Entra ID, SAML, Shibboleth, CAS), where students can't generate an API token by hand.
 
+<!-- mcp-name: io.github.CarlosAndreFerreira/moodle-obsidian-mcp -->
+
 🇵🇹 [Versão em português](https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp/blob/main/README.pt.md)
 
 ---

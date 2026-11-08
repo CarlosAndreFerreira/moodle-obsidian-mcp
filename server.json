@@ -1,0 +1,55 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.CarlosAndreFerreira/moodle-obsidian-mcp",
+  "title": "Moodle + Obsidian",
+  "description": "Moodle for AI assistants, SSO included: courses, grades, deadlines and forums synced to Obsidian.",
+  "version": "0.8.1",
+  "websiteUrl": "https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp",
+  "repository": {
+    "url": "https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "moodle-obsidian-mcp",
+      "version": "0.8.1",
+      "runtimeHint": "uvx",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "OBSIDIAN_VAULT_DIR",
+          "description": "Obsidian vault folder where notes and materials are written.",
+          "format": "filepath",
+          "isRequired": false
+        },
+        {
+          "name": "MOODLE_URL",
+          "description": "Moodle base URL (https). Optional if you log in with `moodle-mcp --login`.",
+          "isRequired": false
+        },
+        {
+          "name": "MOODLE_TOKEN",
+          "description": "Moodle mobile web service token. Prefer `moodle-mcp --login`, which stores it with 0600 permissions.",
+          "isRequired": false,
+          "isSecret": true
+        },
+        {
+          "name": "MOODLE_MCP_TOOLS",
+          "description": "Toolsets to expose: core, grades, forums, obsidian, write, auth, raw, or all.",
+          "default": "core,grades,forums,obsidian",
+          "isRequired": false
+        },
+        {
+          "name": "MOODLE_MCP_LANGUAGE",
+          "description": "Language of the generated notes.",
+          "choices": ["pt", "en"],
+          "default": "pt",
+          "isRequired": false
+        }
+      ]
+    }
+  ]
+}
