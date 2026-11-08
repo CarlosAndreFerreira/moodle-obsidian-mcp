@@ -17,8 +17,6 @@ Arranque: `moodle-mcp` (ver `main`), `python -m moodle_mcp.server`, ou o shim
 """
 
 import argparse
-import base64
-import binascii
 import functools
 import hashlib
 import json
@@ -30,7 +28,7 @@ import webbrowser
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any, cast
-from urllib.parse import unquote, urlparse
+from urllib.parse import urlparse
 
 import anyio
 import anyio.from_thread
@@ -558,16 +556,7 @@ def decode_mobile_launch_token(
         Dicionário com `saved`, `instance`, `token_fingerprint`, `has_privatetoken`
         e `validation` (o resultado de `set_moodle_token`).
     """
-    raw = launch_url_or_base64.strip()
-    if "token=" in raw:
-        raw = raw.split("token=", 1)[1].split("&", 1)[0]
-    # Alguns navegadores entregam o payload com percent-encoding (%2B, %2F, %3D).
-    raw = unquote(raw).strip()
-    try:
-        decoded = base64.b64decode(raw + "=" * (-len(raw) % 4)).decode("utf-8", errors="ignore")
-    except (binascii.Error, ValueError):
-        decoded = ""
-    parts = decoded.split(":::")
+    parts = login.parse_launch_payload(launch_url_or_base64)
     if len(parts) < 2 or not parts[1].strip():
         return {
             "error": True,

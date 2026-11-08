@@ -28,7 +28,7 @@ Most MCP servers for third-party platforms pipe untrusted content straight into 
 
 ## Features
 
-- **SSO token capture** — `moodle-mcp --login` starts the mobile-app login in your browser with a single-use passport; a `moodlemobile://` URL handler receives the redirect, checks Moodle's signature and stores the token (`0600`). Registered natively on Linux (`xdg-mime`), Windows (`HKEY_CURRENT_USER`, no admin) and macOS (an AppleScript applet registered with Launch Services). The token never passes through the model.
+- **SSO token capture** — `moodle-mcp --login` starts the mobile-app login in your browser with a single-use passport; a `moodlemobile://` URL handler receives the redirect, checks Moodle's signature and stores the token (`0600`). Registered natively on Linux (`xdg-mime`), Windows (`HKEY_CURRENT_USER`, no admin) and macOS (an AppleScript applet registered with Launch Services). The token never passes through the model, and the handler moves the URL out of its command-line arguments at once, so other local users can't read it with `ps`.
 - **Obsidian dashboard sync** — a central note with every course, progress, current grades and a sorted deadline calendar; one note per course with grade report, per-assignment submission status, assignment briefs converted to Markdown and the resource tree.
 - **Course material download** — PDFs, slides and HTML pages saved into the vault, with each PDF converted to a searchable `.pdf.md` that agents can read (optional `[pdf]` extra).
 - **32 tools** across courses, books and pages, completion, grades, assignments and submissions, quizzes, forums (search, export to Obsidian, reply), messages and calendar.

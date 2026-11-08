@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "moodle-obsidian-mcp"
-version = "0.7.1"
+version = "0.7.2"
 description = "MCP server for Moodle with server-side prompt-injection defenses, SSO login and Obsidian vault sync"
 readme = "README.md"
 # tomllib é stdlib a partir do 3.11 e é o que lê o config.toml sem dependências.
