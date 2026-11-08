@@ -40,7 +40,19 @@ from mcp.types import ToolAnnotations
 from pydantic import Field
 from urllib3.util import parse_url
 
-from moodle_mcp import __version__, config, confirm, handler, login, sanitize, state, transport, vault
+from moodle_mcp import (
+    __version__,
+    changes,
+    config,
+    confirm,
+    handler,
+    ics,
+    login,
+    sanitize,
+    state,
+    transport,
+    vault,
+)
 from moodle_mcp.transport import MoodleRequestError
 
 try:  # O PyMuPDF é AGPL-3.0 e fica no extra `[pdf]`; sem ele tudo o resto funciona.
@@ -1737,6 +1749,7 @@ def _sync_course(
     vault_dir: str,
     link_root: str,
     dashboard: str,
+    snapshot: dict[str, Any] | None = None,
 ) -> tuple[list[str], list[tuple[int, str, str, str, str, Any, str]], list[tuple[str, str, str]], list[str]]:
     """Sincroniza uma UC e devolve o que entra no painel.
 
@@ -1745,9 +1758,16 @@ def _sync_course(
     secções opcionais (notas, fóruns, escolhas, testes, conteúdos) degradam para
     vazio com o erro registado em `errors`.
 
+    `snapshot`, se dado, é preenchido com o retrato da UC (notas, trabalhos,
+    módulos, tópicos dos fóruns, testes) para `changes.diff` comparar com a
+    sincronização seguinte.
+
     Returns:
         `(linhas_do_painel, prazos, escolhas_pendentes, ficheiros_escritos)`.
     """
+    snap: dict[str, Any] = snapshot if snapshot is not None else {}
+    for key in ("grades", "assignments", "modules", "discussions", "quizzes"):
+        snap.setdefault(key, {})
     dashboard_lines: list[str] = []
     upcoming_items: list[tuple[int, str, str, str, str, Any, str]] = []
     pending_choices: list[tuple[str, str, str]] = []
@@ -1798,6 +1818,9 @@ def _sync_course(
     ]
 
     for gi in grade_items:
+        snap["grades"][
+            str(gi.get("itemname") or ("Total da Disciplina" if gi.get("itemtype") == "course" else "Item"))
+        ] = str(gi.get("gradeformatted") or "—")
         iname = gi.get("itemname") or ("Total da Disciplina" if gi.get("itemtype") == "course" else "Item")
         gval = gi.get("gradeformatted") or "—"
         gmin = gi.get("grademin", "")
@@ -1847,6 +1870,7 @@ def _sync_course(
             if intro:
                 uc_lines.append(f"- **Enunciado / Descrição:**\n\n{intro}\n")
             uc_lines.append("")
+            snap["assignments"][str(aid)] = {"name": aname, "due": duedate, "status": sub_status}
             if duedate:
                 upcoming_items.append((duedate, due_str, cname, aname, "trabalho", aid, sub_status))
 
@@ -1854,6 +1878,22 @@ def _sync_course(
     forums_resp = _soft(
         get_course_forums, cid, instance=instance, default=[], errors=errors, what=f"{cname}: fóruns"
     )
+    for forum in forums_resp if isinstance(forums_resp, list) else []:
+        # Uma página de tópicos por fórum chega para saber o que é novo ou tem respostas novas.
+        discs = _soft(
+            _moodle_call,
+            "mod_forum_get_forum_discussions",
+            {"forumid": forum.get("id"), "perpage": 20, "page": 0},
+            instance=instance,
+            default={},
+        )
+        for disc in discs.get("discussions", []) if isinstance(discs, dict) else []:
+            snap["discussions"][str(disc.get("discussion") or disc.get("id"))] = {
+                "name": disc.get("name"),
+                "forum": forum.get("name"),
+                "modified": disc.get("timemodified"),
+                "author": disc.get("userfullname"),
+            }
     dated_forums = [f for f in (forums_resp if isinstance(forums_resp, list) else []) if f.get("duedate")]
     if dated_forums:
         uc_lines.extend(
@@ -1922,6 +1962,7 @@ def _sync_course(
     )
     for qz in quizzes_resp.get("quizzes", []) if isinstance(quizzes_resp, dict) else []:
         qclose = int(qz.get("timeclose") or 0)
+        snap["quizzes"][str(qz.get("coursemodule"))] = {"name": qz.get("name"), "close": qclose}
         if qclose:
             qclose_str = datetime.fromtimestamp(qclose).strftime("%Y-%m-%d %H:%M")
             upcoming_items.append(
@@ -1946,6 +1987,7 @@ def _sync_course(
                 mid = mod.get("instance", "")
                 cmid = mod.get("id", "")
                 comp = mod.get("completiondata", {}).get("state", 0)
+                snap["modules"][str(cmid)] = {"name": mname, "type": mtype}
                 check = "✅" if comp == 1 else "⬜"
                 if murl:
                     uc_lines.append(
@@ -2065,7 +2107,8 @@ def sync_dashboard(
         f"# 🎓 Doutoramento — Painel Académico ({base_url})",
         "",
         f"**Estudante:** {fullname} (`userid: {userid}`)  ",
-        f"**Última sincronização:** {now_str}",
+        f"**Última sincronização:** {now_str}  ",
+        "{changes_link}",
         "",
         "## 📚 Unidades Curriculares e Notas",
         "",
@@ -2081,6 +2124,8 @@ def sync_dashboard(
     used_notes: set[Path] = set()
     synced = 0
     dashboard = _dashboard_name(instance)
+    changes_name = _changes_note_name(instance)
+    snapshot: dict[str, Any] = {}
     relative = target_dir.relative_to(vault.vault_root()).as_posix()
     link_root = "" if relative == "." else f"{relative}/"
     for position, course in enumerate(courses):
@@ -2089,6 +2134,7 @@ def sync_dashboard(
             on_progress(position, len(courses), cname)
         # UCs com o mesmo nome escreviam a mesma nota; o painel liga ao nome único.
         note_name = vault.unique_path(Path(vault.safe_filename(cname) + ".md"), used_notes).stem
+        course_snapshot: dict[str, Any] = {"name": cname}
         try:
             rows, upcoming, choices, files = _sync_course(
                 course,
@@ -2105,6 +2151,7 @@ def sync_dashboard(
                 vault_dir=vault_dir,
                 link_root=link_root,
                 dashboard=dashboard,
+                snapshot=course_snapshot,
             )
         except MoodleAPIError as exc:
             if exc.errorcode in _FATAL_ERRORCODES:
@@ -2118,10 +2165,12 @@ def sync_dashboard(
         upcoming_items.extend(upcoming)
         pending_choices.extend(choices)
         created_files.extend(files)
+        snapshot[str(course.get("id"))] = course_snapshot
         synced += 1
 
     now_ts = int(datetime.now().timestamp())
     pending_states = {"new", "draft", "reopened", "sem participação", "—"}
+    dashboard_lines.extend(_task_lines(upcoming_items, now_ts))
     dashboard_lines.extend(
         [
             "",
@@ -2154,8 +2203,34 @@ def sync_dashboard(
     if on_progress:
         on_progress(len(courses), len(courses), "painel")
     dashboard_file = target_dir / f"{dashboard}.md"
-    vault.write_managed_note(dashboard_file, "\n".join(dashboard_lines) + "\n")
+    calendar_file = target_dir / f"{dashboard}.ics"
+    changes_link = f"🔔 [[{link_root}{changes_name}\\|O que mudou]] · 📅 calendário: `{calendar_file.name}`"
+    dashboard_text = "\n".join(dashboard_lines).replace("{changes_link}", changes_link, 1)
+    vault.write_managed_note(dashboard_file, dashboard_text + "\n")
     created_files.insert(0, str(dashboard_file))
+    vault.write_file(calendar_file, ics.build(upcoming_items, instance, base_url))
+    created_files.append(str(calendar_file))
+
+    # O que mudou desde a sincronização anterior (o estado é relido: o download
+    # de materiais escreve no mesmo ficheiro durante a sincronização).
+    root = vault.vault_root()
+    sync_state = state.load(root, instance)
+    previous = sync_state.get("snapshot")
+    found: list[dict[str, str]] | None = None
+    if isinstance(previous, dict):
+        for cid, old in previous.items():
+            snapshot.setdefault(cid, old)  # UCs que falharam agora não aparecem como «novas» depois
+        found = changes.diff(previous, snapshot)
+    since = str(sync_state.get("synced_at") or "—")
+    changes_file = target_dir / f"{changes_name}.md"
+    vault.write_managed_note(changes_file, changes.render(found, since, now_str))
+    created_files.insert(1, str(changes_file))
+    sync_state.update(
+        snapshot=snapshot,
+        synced_at=now_str,
+        last_changes={"since": since, "at": now_str, "changes": found or [], "first_sync": found is None},
+    )
+    state.save(root, instance, sync_state)
 
     return {
         "status": "ok" if not errors else "parcial",
@@ -2163,8 +2238,51 @@ def sync_dashboard(
         "courses_synced": synced,
         "courses_total": len(courses),
         "files_written": created_files,
+        "changes_count": len(found or []),
         "errors": errors,
     }
+
+
+def _changes_note_name(instance: str) -> str:
+    """Nome da nota «O que mudou»; com várias instâncias, uma por instância."""
+    base = "O que mudou no Moodle"
+    return f"{base} ({instance})" if len(config.instances()) > 1 else base
+
+
+def _task_lines(items: list[tuple[int, str, str, str, str, Any, str]], now_ts: int) -> list[str]:
+    """Prazos no formato do plugin Obsidian Tasks (`- [ ] … 📅 AAAA-MM-DD`).
+
+    Só os prazos futuros e os das duas últimas semanas, para a lista não crescer
+    sem fim. Um trabalho entregue (ou um fórum com participação) sai marcado
+    como feito. Ficam dentro do bloco gerido: marcar à mão é substituído na
+    sincronização seguinte, que reflete o estado no Moodle.
+    """
+    recent = [item for item in items if item[0] and item[0] >= now_ts - 14 * 86400]
+    if not recent:
+        return []
+    lines = ["", "## ✅ Tarefas (Obsidian Tasks)", ""]
+    for due_ts, _due_str, cname, aname, _kind, _ref, status in sorted(recent, key=lambda x: x[0]):
+        done = status == "submitted" or "post(s) meus" in str(status)
+        day = datetime.fromtimestamp(due_ts).strftime("%Y-%m-%d")
+        text = f"{aname} — {cname}".replace("\n", " ")
+        lines.append(f"- [{'x' if done else ' '}] {text} 📅 {day}")
+    return lines
+
+
+@mcp.tool(annotations=_ann("Ver o que mudou no Moodle", read_only=True))
+def get_recent_changes(
+    instance: Inst = DEFAULT_INSTANCE,
+) -> dict[str, Any]:
+    """Mostra o que mudou no Moodle entre as duas últimas sincronizações.
+
+    Notas lançadas, prazos alterados, trabalhos e testes novos, materiais novos
+    e tópicos de fórum novos ou com respostas novas. Não faz pedidos ao Moodle:
+    lê o resultado guardado pela última `sync_doctoral_dashboard_to_obsidian`.
+    """
+    last = state.load(vault.vault_root(), (instance or DEFAULT_INSTANCE).strip().lower()).get("last_changes")
+    if not isinstance(last, dict):
+        return {"changes": [], "message": "Ainda não houve nenhuma sincronização com comparação."}
+    return last
 
 
 # ==============================================================================
@@ -2206,6 +2324,7 @@ TOOLSETS: dict[str, tuple[str, ...]] = {
         "download_all_course_materials_to_obsidian",
         "export_forum_discussions_to_obsidian",
         "sync_doctoral_dashboard_to_obsidian",
+        "get_recent_changes",
     ),
     "write": (
         "toggle_activity_completion",

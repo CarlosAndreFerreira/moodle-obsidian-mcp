@@ -18,20 +18,22 @@ Works with any Moodle that has Web Services and the mobile app service enabled �
 
 Most MCP servers for third-party platforms pipe untrusted content straight into the model and expose every write action by default. Moodle is a worst case for that: any participant in a course can write forum posts the model will read, and actions like submitting an assignment can't be undone. This server is designed around that threat model:
 
-- **Read-only by default.** Write tools (submissions, forum posts, messages) and the raw Web Services API are off unless you enable them explicitly. 17 of the 21 default tools carry `readOnlyHint`, so a client can auto-approve them without auto-approving anything irreversible.
+- **Read-only by default.** Write tools (submissions, forum posts, messages) and the raw Web Services API are off unless you enable them explicitly. 18 of the 22 default tools carry `readOnlyHint`, so a client can auto-approve them without auto-approving anything irreversible.
 - **Prompt-injection defenses on the server side** (OWASP LLM01), not delegated to the model:
   - hidden content is stripped from every Moodle response — `display:none`, `font-size:0`, `hidden`, HTML comments, Unicode tag characters, zero-width and bidi control characters — so the model reads what the student sees;
   - notes written to the vault can't execute anything: `dataviewjs`/`dataview` blocks, inline Dataview and Templater commands are neutralised, remote images become links (no tracking pixels);
   - every Moodle write requires **user confirmation via MCP elicitation**, showing the exact recipient and text — even when the client is set to auto-approve.
 - **Token confinement.** Credentials never appear in tool responses. The token is only ever attached to `pluginfile.php` URLs on the configured instance; any other host is refused before a request is made. Tools that can overwrite credentials are off by default, so a malicious forum post can't swap your token.
-- **Context-budget aware.** The full tool set costs ~8,900 tokens per request; selectable toolsets cut that to ~1,600–4,950.
+- **Context-budget aware.** The full tool set costs ~9,700 tokens per request; selectable toolsets cut that to ~1,750–5,500.
 
 ## Features
 
 - **SSO token capture** — `moodle-mcp --login` starts the mobile-app login in your browser with a single-use passport; a `moodlemobile://` URL handler receives the redirect, checks Moodle's signature and stores the token (`0600`). Registered natively on Linux (`xdg-mime`), Windows (`HKEY_CURRENT_USER`, no admin) and macOS (an AppleScript applet registered with Launch Services). The token never passes through the model, and the handler moves the URL out of its command-line arguments at once, so other local users can't read it with `ps`.
 - **Obsidian dashboard sync** — a central note with every course, progress, current grades and a sorted deadline calendar; one note per course with grade report, per-assignment submission status, assignment briefs converted to Markdown and the resource tree.
+- **What changed** — each sync compares with the previous one and writes a note (and `get_recent_changes` returns it, without calling Moodle): new grades, changed deadlines, new assignments and quizzes, new materials, new forum topics and topics with new replies.
+- **Deadlines everywhere** — a `.ics` calendar next to the dashboard (import or subscribe in Google Calendar, Outlook, Thunderbird or your phone; a reminder the day before), and an Obsidian Tasks list (`- [ ] … 📅 YYYY-MM-DD`) in the dashboard.
 - **Course material download** — PDFs, slides and HTML pages saved into the vault, with each PDF converted to a searchable `.pdf.md` that agents can read (optional `[pdf]` extra).
-- **32 tools** across courses, books and pages, completion, grades, assignments and submissions, quizzes, forums (search, export to Obsidian, reply), messages and calendar.
+- **33 tools** across courses, books and pages, completion, grades, assignments and submissions, quizzes, forums (search, export to Obsidian, reply), messages and calendar.
 - **Multi-instance** — an open registry of Moodle instances; when more than one is configured, the `instance` parameter is exposed as an **enum in the schema**, so the model gets the valid names instead of free text.
 
 ## Install
@@ -110,11 +112,11 @@ Unnamed `MOODLE_URL` / `MOODLE_TOKEN` still work as the default instance, but on
 
 | `--tools` | Tools | ~tokens | Writes to Moodle |
 |:---|--:|--:|:---|
-| **(default)** | **21** | **~4,950** | **no** |
-| `core,grades,forums,obsidian,write` | 28 | ~7,250 | yes |
-| `all` | 32 | ~8,900 | yes, plus the raw API |
-| `core,obsidian` | 12 | ~3,200 | no |
-| `core` | 8 | ~1,600 | no |
+| **(default)** | **22** | **~5,500** | **no** |
+| `core,grades,forums,obsidian,write` | 29 | ~7,900 | yes |
+| `all` | 33 | ~9,700 | yes, plus the raw API |
+| `core,obsidian` | 13 | ~3,700 | no |
+| `core` | 8 | ~1,750 | no |
 
 `core` is always included. `write` and `raw` log a warning at startup. `auth` (tools that store credentials) is off by default; even when on, `set_moodle_token` validates the token, accepts only `https://` URLs and won't change an existing instance's URL.
 
