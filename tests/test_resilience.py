@@ -265,10 +265,10 @@ def small_moodle(monkeypatch, vault):
 def test_sync_subdir_moves_everything_and_links_follow(small_moodle, vault, monkeypatch):
     monkeypatch.setenv("MOODLE_MCP_SYNC_SUBDIR", "Moodle")
     server.sync_dashboard(instance="test")
-    dashboard = (vault / "Moodle" / "Doutoramento - Painel Moodle.md").read_text(encoding="utf-8")
+    dashboard = (vault / "Moodle" / "Painel Moodle.md").read_text(encoding="utf-8")
     assert "[[Moodle/Unidades Curriculares/Ética\\|Abrir UC]]" in dashboard
     note = (vault / "Moodle" / "Unidades Curriculares" / "Ética.md").read_text(encoding="utf-8")
-    assert "[[Moodle/Doutoramento - Painel Moodle\\|" in note
+    assert "[[Moodle/Painel Moodle\\|" in note
     assert not (vault / "Unidades Curriculares").exists()
 
 
@@ -303,7 +303,7 @@ def test_async_sync_reports_progress(small_moodle):
 
     ctx = SimpleNamespace(report_progress=report_progress)
     result = asyncio.run(server.sync_doctoral_dashboard_to_obsidian(instance="test", ctx=ctx))
-    assert result["courses_synced"] == 2
+    assert result.courses_synced == 2
     assert reported == [(0, 2, "Ética"), (1, 2, "Lógica"), (2, 2, "painel")]
 
 

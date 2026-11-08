@@ -11,7 +11,7 @@ Servidor **Model Context Protocol (MCP)** em Python (`FastMCP`) desenhado para e
 1. **Auto-Descoberta de Token Mobile via Browser (`moodlemobile://`):**
    * Mesmo quando a universidade usa SSO federado (Microsoft Entra ID / SAML / Shibboleth / CAS) e oculta a página `/user/managetoken.php` aos estudantes, o capturador nativo (`capture_mobile_token.py` registado via `xdg-mime`) interceta o redirecionamento `moodlemobile://token=...` diretamente do navegador (Brave, Firefox, Chrome), descodifica o Base64, guarda o `wstoken` em `.env` e sincroniza o cofre do Obsidian automaticamente.
 2. **Sincronização Completa para o Obsidian (`sync_doctoral_dashboard_to_obsidian`):**
-   * Gera um painel central (`Doutoramento - Painel Moodle.md`) com tabela de Unidades Curriculares, progresso, notas atuais e calendário ordenado de prazos de *e-fólios* / trabalhos.
+   * Gera um painel central (`Painel Moodle.md`; um Vault que já tenha `Doutoramento - Painel Moodle.md` continua a usá-lo) com tabela de Unidades Curriculares, progresso, notas atuais e calendário ordenado de prazos de *e-fólios* / trabalhos.
    * Cria uma nota individual por cada Unidade Curricular (`Unidades Curriculares/<Nome da UC>.md`) com grelha de avaliação (`gradereport`), estado de submissão de cada *e-fólio* (`mod_assign`), enunciados convertidos para Markdown e árvore de recursos.
 3. **Download de Materiais + Extração de PDFs para Markdown (`PyMuPDF`):**
    * `download_all_course_materials_to_obsidian`: Descarrega automaticamente todos os PDFs, slides, enunciados anexos e páginas HTML de uma cadeira para `Unidades Curriculares/<UC>/Materiais/` e converte cada PDF num ficheiro `.pdf.md` pesquisável no Obsidian e legível por agentes de IA.
@@ -92,7 +92,32 @@ leitura.
 moodle-mcp --show-config      # onde tudo é lido, sem revelar segredos
 moodle-mcp --list-toolsets    # que ferramentas cada toolset expõe
 moodle-mcp --set sync_subdir=Moodle --set instances.utad.url=https://e-learning.utad.pt
+moodle-mcp --set language=en  # texto das notas em inglês (omissão: pt)
 ```
+
+Opções das notas: `language` (`pt`/`en`), `dashboard_name`, `courses_dir`
+(omissão `Unidades Curriculares`) e `sync_subdir`. Mudar de língua muda o texto
+das notas, não as pastas.
+
+### Sincronização agendada
+
+```bash
+moodle-mcp --sync                    # sincroniza já todas as instâncias com token
+moodle-mcp --schedule 6              # a cada 6 horas (1–24); --materials descarrega também os ficheiros
+moodle-mcp --unschedule
+```
+
+Usa o agendador do sistema (timer do systemd, LaunchAgent no macOS, Agendador
+de Tarefas no Windows), sem cliente MCP aberto. A tarefa lê o mesmo
+`config.toml` e `credentials.json`: nenhum token vai para os ficheiros da
+tarefa nem para a linha de comandos. Como o agendador não vê o ambiente do
+cliente MCP, grava o Vault no `config.toml` (`moodle-mcp --set
+obsidian_vault_dir=…`). O resultado da última execução fica em
+`last_sync.log`, no diretório de configuração.
+
+O servidor expõe também os *resources* `moodle://changes`, `moodle://deadlines`
+e `moodle://dashboard` (a última sincronização, sem pedidos ao Moodle) e os
+*prompts* `weekly_review`, `prepare_assignment` e `forum_catch_up`.
 
 ### Instâncias Moodle
 

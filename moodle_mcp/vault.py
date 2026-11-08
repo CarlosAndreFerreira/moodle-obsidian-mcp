@@ -18,7 +18,7 @@ from typing import Any
 
 from markdownify import markdownify as md_convert
 
-from moodle_mcp import config, sanitize
+from moodle_mcp import config, i18n, sanitize
 
 OBSIDIAN_VAULT_DIR = os.path.expanduser(config.get("obsidian_vault_dir"))
 
@@ -218,9 +218,12 @@ def write_managed_note(path: Path, markdown: str) -> Path | None:
 
     """
     generated_fm, generated_body = _split_frontmatter(sanitize.neutralize_markdown(markdown))
-    block = f"{MANAGED_START}\n{generated_body.strip()}\n{MANAGED_END}\n"
+    # A deteção (`_START_RE`) só olha para `moodle-mcp:start`: o resto do
+    # marcador e a linha da parte do estudante podem vir na língua configurada.
+    start_marker = i18n.t("vault.managed_start")
+    block = f"{start_marker}\n{generated_body.strip()}\n{MANAGED_END}\n"
     backup: Path | None = None
-    before, after = "", USER_SECTION
+    before, after = "", i18n.t("vault.user_section")
     existing_fm: list[str] = []
 
     if path.exists():

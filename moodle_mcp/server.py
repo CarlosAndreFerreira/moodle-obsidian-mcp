@@ -46,13 +46,16 @@ from moodle_mcp import (
     config,
     confirm,
     handler,
+    i18n,
     ics,
     login,
     sanitize,
+    schedule,
     state,
     transport,
     vault,
 )
+from moodle_mcp.schemas import DownloadResult, ExportResult, RecentChanges, SyncResult
 from moodle_mcp.transport import MoodleRequestError
 
 try:  # O PyMuPDF é AGPL-3.0 e fica no extra `[pdf]`; sem ele tudo o resto funciona.
@@ -1004,14 +1007,15 @@ async def download_all_course_materials_to_obsidian(
     ] = True,
     instance: Inst = DEFAULT_INSTANCE,
     vault_dir: VaultDir = "",
-) -> dict[str, Any]:
+) -> DownloadResult:
     """
     Descarrega TODOS os ficheiros (PDFs, enunciados de e-fólios, slides, textos de apoio e páginas HTML)
     de uma disciplina diretamente para a pasta da Unidade Curricular dentro do teu Vault do Obsidian
     (`<Vault>/Unidades Curriculares/<Nome da UC>/Materiais/`),
     convertendo também os PDFs e Páginas HTML em notas Markdown pesquisáveis!
     """
-    return await _in_thread(download_course_materials, course_id, extract_pdfs, instance, vault_dir)
+    result = await _in_thread(download_course_materials, course_id, extract_pdfs, instance, vault_dir)
+    return DownloadResult.model_validate(_raise_on_error(result))
 
 
 def download_course_materials(
@@ -1024,9 +1028,7 @@ def download_course_materials(
 
     cname = _course_folder_name(course_id, instance)
 
-    base_uc_dir = vault.resolve_in_vault(
-        _sync_root(vault_dir) / "Unidades Curriculares" / cname / "Materiais"
-    )
+    base_uc_dir = vault.resolve_in_vault(_sync_root(vault_dir) / _courses_dir() / cname / "Materiais")
     base_uc_dir.mkdir(parents=True, exist_ok=True)
 
     downloaded: list[str] = []
@@ -1099,7 +1101,10 @@ def download_course_materials(
                             except Exception as e:
                                 errors.append({"file": fname, "error": str(e)})
 
-    state.save(root, instance, sync_state)
+    with state.locked(root, instance):  # outra sincronização pode ter gravado entretanto
+        latest = state.load(root, instance)
+        latest.setdefault("files", {}).update(files)
+        state.save(root, instance, latest)
     return {
         "course_id": course_id,
         "course_name": cname,
@@ -1568,13 +1573,14 @@ async def export_forum_discussions_to_obsidian(
     course_id: CourseId,
     instance: Inst = DEFAULT_INSTANCE,
     vault_dir: VaultDir = "",
-) -> dict[str, Any]:
+) -> ExportResult:
     """
     Exporta todos os fóruns e debates de uma disciplina para ficheiros Markdown organizados no Obsidian
     (`<Vault>/Unidades Curriculares/<UC>/Foruns/`).
     Útil para teres as orientações do professor e as discussões assíncronas no Vault.
     """
-    return await _in_thread(export_course_forums, course_id, instance, vault_dir)
+    result = await _in_thread(export_course_forums, course_id, instance, vault_dir)
+    return ExportResult.model_validate(_raise_on_error(result))
 
 
 def export_course_forums(
@@ -1587,7 +1593,7 @@ def export_course_forums(
 
     cname = _course_folder_name(course_id, instance)
 
-    foruns_dir = vault.resolve_in_vault(_sync_root(vault_dir) / "Unidades Curriculares" / cname / "Foruns")
+    foruns_dir = vault.resolve_in_vault(_sync_root(vault_dir) / _courses_dir() / cname / "Foruns")
     foruns_dir.mkdir(parents=True, exist_ok=True)
 
     exported_files = []
@@ -1666,14 +1672,34 @@ def _sync_root(vault_dir: str = "") -> Path:
     return vault.resolve_in_vault(vault_dir or config.get("sync_subdir") or ".")
 
 
-def _dashboard_name(instance: str) -> str:
+#: Nome do painel antes de haver a opção `language`; mantido se já existir no Vault.
+LEGACY_DASHBOARD_NAME = "Doutoramento - Painel Moodle"
+
+
+def _courses_dir() -> str:
+    """Pasta das notas das UCs (opção `courses_dir`), como um único nome de pasta seguro."""
+    return vault.safe_filename(config.get("courses_dir") or "Unidades Curriculares")
+
+
+def _dashboard_name(instance: str, target_dir: Path | None = None) -> str:
     """Nome da nota do painel; com várias instâncias, uma por instância.
 
     Com um único nome, sincronizar a segunda instância apagava o painel da
-    primeira.
+    primeira. Sem `dashboard_name` configurado, um painel com o nome antigo
+    que já exista em `target_dir` continua a ser usado (as instalações antigas
+    não ficam com dois painéis); senão, o nome vem da língua.
     """
-    base = vault.safe_filename(config.get("dashboard_name") or "Painel Moodle")
-    return f"{base} ({instance})" if len(config.instances()) > 1 else base
+    multi = len(config.instances()) > 1
+
+    def named(base: str) -> str:
+        return f"{base} ({instance})" if multi else base
+
+    configured = config.get("dashboard_name")
+    if configured:
+        return named(vault.safe_filename(configured))
+    if target_dir is not None and (target_dir / f"{named(LEGACY_DASHBOARD_NAME)}.md").exists():
+        return named(LEGACY_DASHBOARD_NAME)
+    return named(vault.safe_filename(i18n.t("dashboard.default_name")))
 
 
 async def _in_thread(fn: Any, *args: Any, **kwargs: Any) -> Any:
@@ -1774,7 +1800,7 @@ def _sync_course(
     created_files: list[str] = []
 
     cid = int(course["id"])
-    cname = course.get("fullname") or course.get("shortname") or f"Curso {cid}"
+    cname = course.get("fullname") or course.get("shortname") or i18n.t("course.fallback", id=cid)
     safe_name = note_name
     progress = course.get("progress")
     prog_str = f"{int(progress)}%" if progress is not None else "—"
@@ -1791,11 +1817,13 @@ def _sync_course(
             for gi in grade_items:
                 if gi.get("itemtype") == "course":
                     course_total = gi.get("gradeformatted") or "—"
+    total_label = i18n.t("course.total")
+    courses_dir = _courses_dir()
 
     course_assigns = assign_by_course.get(cid, [])
     uc_note_name = f"{safe_name}.md"
     dashboard_lines.append(
-        f"| `{cid}` | **{vault.table_cell(cname)}** | {prog_str} | **{course_total}** | {len(course_assigns)} | [[{link_root}Unidades Curriculares/{safe_name}\\|Abrir UC]] |"
+        f"| `{cid}` | **{vault.table_cell(cname)}** | {prog_str} | **{course_total}** | {len(course_assigns)} | [[{link_root}{courses_dir}/{safe_name}\\|{i18n.t('dashboard.open_course')}]] |"
     )
 
     uc_lines = [
@@ -1809,19 +1837,23 @@ def _sync_course(
         "",
         f"# 📘 {cname}",
         "",
-        f"⬅️ Voltar a [[{link_root}{dashboard}\\|{dashboard}]] | 🔗 [Abrir no Moodle]({base_url}/course/view.php?id={cid})",
+        f"⬅️ {i18n.t('course.back')} [[{link_root}{dashboard}\\|{dashboard}]] | "
+        f"🔗 [{i18n.t('course.open_moodle')}]({base_url}/course/view.php?id={cid})",
         "",
-        "## 📊 Avaliações e Notas (`gradereport`)",
+        f"## {i18n.t('course.grades')}",
         "",
-        "| Item de Avaliação | Nota | Intervalo | Feedback do Professor |",
+        i18n.t("course.grades_header"),
         "|:---|:---:|:---:|:---|",
     ]
 
     for gi in grade_items:
-        snap["grades"][
-            str(gi.get("itemname") or ("Total da Disciplina" if gi.get("itemtype") == "course" else "Item"))
-        ] = str(gi.get("gradeformatted") or "—")
-        iname = gi.get("itemname") or ("Total da Disciplina" if gi.get("itemtype") == "course" else "Item")
+        iname = gi.get("itemname") or (
+            total_label if gi.get("itemtype") == "course" else i18n.t("course.item")
+        )
+        # Chave estável no retrato: com a etiqueta traduzida, mudar de língua
+        # parecia uma nota nova em cada UC.
+        key = gi.get("itemname") or (changes.COURSE_TOTAL_KEY if gi.get("itemtype") == "course" else "Item")
+        snap["grades"][str(key)] = str(gi.get("gradeformatted") or "—")
         gval = gi.get("gradeformatted") or "—"
         gmin = gi.get("grademin", "")
         gmax = gi.get("grademax", "")
@@ -1833,19 +1865,23 @@ def _sync_course(
     uc_lines.extend(
         [
             "",
-            "## 📝 Trabalhos, E-fólios e P-fólios (`mod_assign`)",
+            f"## {i18n.t('course.assignments')}",
             "",
         ]
     )
 
     if not course_assigns:
-        uc_lines.append("_Nenhum trabalho registado nesta disciplina._")
+        uc_lines.append(i18n.t("course.no_assignments"))
     else:
         for a in course_assigns:
             aid = a.get("id")
-            aname = a.get("name", f"Trabalho {aid}")
+            aname = a.get("name", i18n.t("course.assignment_fallback", id=aid))
             duedate = a.get("duedate", 0)
-            due_str = datetime.fromtimestamp(duedate).strftime("%Y-%m-%d %H:%M") if duedate else "Sem prazo"
+            due_str = (
+                datetime.fromtimestamp(duedate).strftime("%Y-%m-%d %H:%M")
+                if duedate
+                else i18n.t("course.no_due")
+            )
             intro = vault.html_to_markdown(a.get("intro", ""))
 
             # Check student's submission status
@@ -1863,12 +1899,13 @@ def _sync_course(
             uc_lines.extend(
                 [
                     f"### 📌 {aname} (`assign_id: {aid}`)",
-                    f"- **Prazo de entrega:** `{due_str}`",
-                    f"- **Estado da Submissão:** `{sub_status}` | **Avaliação:** `{grading_status}`",
+                    f"- **{i18n.t('course.due')}:** `{due_str}`",
+                    f"- **{i18n.t('course.submission')}:** `{sub_status}` | "
+                    f"**{i18n.t('course.grading')}:** `{grading_status}`",
                 ]
             )
             if intro:
-                uc_lines.append(f"- **Enunciado / Descrição:**\n\n{intro}\n")
+                uc_lines.append(f"- **{i18n.t('course.description')}:**\n\n{intro}\n")
             uc_lines.append("")
             snap["assignments"][str(aid)] = {"name": aname, "due": duedate, "status": sub_status}
             if duedate:
@@ -1899,9 +1936,9 @@ def _sync_course(
         uc_lines.extend(
             [
                 "",
-                "## 🏛 Fóruns com prazo (`mod_forum`)",
+                f"## {i18n.t('course.forums')}",
                 "",
-                "| Prazo | Fórum | Discussões | Posts meus | cmid |",
+                i18n.t("course.forums_header"),
                 "|:---|:---|:---:|:---:|---:|",
             ]
         )
@@ -1909,7 +1946,7 @@ def _sync_course(
             fdue = int(f.get("duedate") or 0)
             fdue_str = datetime.fromtimestamp(fdue).strftime("%Y-%m-%d %H:%M")
             n_disc, n_mine = _count_my_forum_posts(int(f["id"]), userid, instance=instance)
-            fstatus = f"{n_mine} post(s) meus" if n_mine else "sem participação"
+            fstatus = i18n.t("course.my_posts", n=n_mine) if n_mine else i18n.t("course.no_participation")
             forum_url = f"{base_url}/mod/forum/view.php?id={f.get('cmid')}"
             uc_lines.append(
                 f"| `{fdue_str}` | "
@@ -1945,8 +1982,8 @@ def _sync_course(
             uc_lines.extend(
                 [
                     "",
-                    f"> ⚠️ **Escolha por responder:** {vault.md_link(ch.get('name'), ch_url)} "
-                    f"({len(options)} opções disponíveis)",
+                    f"> ⚠️ **{i18n.t('course.choice_pending')}:** {vault.md_link(ch.get('name'), ch_url)} "
+                    f"({i18n.t('course.choice_options', n=len(options))})",
                 ]
             )
 
@@ -1972,16 +2009,16 @@ def _sync_course(
     contents = _soft(
         get_course_contents, cid, instance=instance, default=None, errors=errors, what=f"{cname}: conteúdos"
     )
-    uc_lines.extend(["", "## 📂 Conteúdos, Tópicos e Materiais da Disciplina", ""])
+    uc_lines.extend(["", f"## {i18n.t('course.contents')}", ""])
     if isinstance(contents, list):
         for section in contents:
-            sec_name = section.get("name") or f"Secção {section.get('section', '')}"
+            sec_name = section.get("name") or i18n.t("course.section", n=section.get("section", ""))
             uc_lines.append(f"### {sec_name}")
             sec_summary = vault.html_to_markdown(section.get("summary", ""))
             if sec_summary:
                 uc_lines.append(sec_summary)
             for mod in section.get("modules", []):
-                mname = mod.get("name", "Recurso")
+                mname = mod.get("name", i18n.t("course.resource"))
                 mtype = mod.get("modname", "")
                 murl = mod.get("url", "")
                 mid = mod.get("instance", "")
@@ -2034,14 +2071,14 @@ async def sync_doctoral_dashboard_to_obsidian(
     ] = False,
     instance: Inst = DEFAULT_INSTANCE,
     ctx: Context = None,  # type: ignore[assignment]  # injetado pelo FastMCP
-) -> dict[str, Any]:
+) -> SyncResult:
     """
     Sincroniza todas as disciplinas inscritas, notas detalhadas, estado de submissão dos e-fólios/p-fólios,
     progresso de atividades e prazos do Moodle para o teu Vault do Doutoramento no Obsidian.
     Se `download_materials=True`, descarrega também todos os PDFs e converte-os para Markdown!
     Se `export_forums=True`, exporta também todos os tópicos dos fóruns para o Obsidian!
     """
-    return await _in_thread(
+    result = await _in_thread(
         sync_dashboard,
         vault_dir,
         download_materials,
@@ -2049,6 +2086,7 @@ async def sync_doctoral_dashboard_to_obsidian(
         instance,
         on_progress=_progress_reporter(ctx),
     )
+    return SyncResult.model_validate(_raise_on_error(result))
 
 
 def sync_dashboard(
@@ -2075,7 +2113,7 @@ def sync_dashboard(
     base_url, _ = _resolve_target(instance)
     target_dir = _sync_root(vault_dir)
     target_dir.mkdir(parents=True, exist_ok=True)
-    uc_dir = target_dir / "Unidades Curriculares"
+    uc_dir = target_dir / _courses_dir()
     uc_dir.mkdir(parents=True, exist_ok=True)
 
     site_info = _moodle_call("core_webservice_get_site_info", instance=instance)
@@ -2099,20 +2137,20 @@ def sync_dashboard(
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
     dashboard_lines = [
         "---",
-        f"title: Painel Moodle ({instance})",
+        f"title: {vault.yaml_scalar(i18n.t('dashboard.title', instance=instance))}",
         f"updated: {now_str}",
         f"tags: [moodle, painel, {instance}]",
         "---",
         "",
-        f"# 🎓 Doutoramento — Painel Académico ({base_url})",
+        f"# {i18n.t('dashboard.heading', base_url=base_url)}",
         "",
-        f"**Estudante:** {fullname} (`userid: {userid}`)  ",
-        f"**Última sincronização:** {now_str}  ",
+        f"**{i18n.t('dashboard.student')}:** {fullname} (`userid: {userid}`)  ",
+        f"**{i18n.t('dashboard.last_sync')}:** {now_str}  ",
         "{changes_link}",
         "",
-        "## 📚 Unidades Curriculares e Notas",
+        f"## {i18n.t('dashboard.courses')}",
         "",
-        "| ID | Unidade Curricular | Progresso | Nota Atual | E-fólios / Trabalhos | Página da UC |",
+        i18n.t("dashboard.courses_header"),
         "|---:|:---|:---:|:---:|:---:|:---|",
     ]
 
@@ -2123,13 +2161,17 @@ def sync_dashboard(
     errors: list[dict[str, str]] = []
     used_notes: set[Path] = set()
     synced = 0
-    dashboard = _dashboard_name(instance)
+    dashboard = _dashboard_name(instance, target_dir)
     changes_name = _changes_note_name(instance)
     snapshot: dict[str, Any] = {}
     relative = target_dir.relative_to(vault.vault_root()).as_posix()
     link_root = "" if relative == "." else f"{relative}/"
     for position, course in enumerate(courses):
-        cname = course.get("fullname") or course.get("shortname") or f"Curso {course.get('id')}"
+        cname = (
+            course.get("fullname")
+            or course.get("shortname")
+            or i18n.t("course.fallback", id=course.get("id"))
+        )
         if on_progress:
             on_progress(position, len(courses), cname)
         # UCs com o mesmo nome escreviam a mesma nota; o painel liga ao nome único.
@@ -2169,14 +2211,14 @@ def sync_dashboard(
         synced += 1
 
     now_ts = int(datetime.now().timestamp())
-    pending_states = {"new", "draft", "reopened", "sem participação", "—"}
+    pending_states = {"new", "draft", "reopened", "—", *i18n.all_values("course.no_participation")}
     dashboard_lines.extend(_task_lines(upcoming_items, now_ts))
     dashboard_lines.extend(
         [
             "",
-            "## ⏰ Calendário de Prazos (trabalhos, fóruns avaliados e testes)",
+            f"## {i18n.t('dashboard.deadlines')}",
             "",
-            "| Data Limite | Tipo | Unidade Curricular | Atividade | Estado | ID |",
+            i18n.t("dashboard.deadlines_header"),
             "|:---|:---:|:---|:---|:---:|---:|",
         ]
     )
@@ -2184,27 +2226,30 @@ def sync_dashboard(
         # Só sinaliza o que continua em falta: um prazo passado já entregue não é um alerta.
         flag = " ⚠️" if due_ts < now_ts and status in pending_states else ""
         dashboard_lines.append(
-            f"| `{due_str}`{flag} | {kind} | {vault.table_cell(cname)} | **{vault.table_cell(aname)}** | `{status}` | `{ref_id}` |"
+            f"| `{due_str}`{flag} | {i18n.t('kind.' + kind)} | {vault.table_cell(cname)} | **{vault.table_cell(aname)}** | `{status}` | `{ref_id}` |"
         )
 
     if pending_choices:
         dashboard_lines.extend(
             [
                 "",
-                "## 🗳 Escolhas e inscrições por responder",
+                f"## {i18n.t('dashboard.choices')}",
                 "",
             ]
         )
         for cname, ch_name, ch_url in pending_choices:
             dashboard_lines.append(f"- {cname} — {vault.md_link(ch_name, ch_url)}")
     dashboard_lines.append("")
-    dashboard_lines.append("_⚠️ = prazo já ultrapassado e atividade ainda em falta._")
+    dashboard_lines.append(i18n.t("dashboard.legend"))
 
     if on_progress:
         on_progress(len(courses), len(courses), "painel")
     dashboard_file = target_dir / f"{dashboard}.md"
     calendar_file = target_dir / f"{dashboard}.ics"
-    changes_link = f"🔔 [[{link_root}{changes_name}\\|O que mudou]] · 📅 calendário: `{calendar_file.name}`"
+    changes_link = (
+        f"🔔 [[{link_root}{changes_name}\\|{i18n.t('dashboard.changes_link')}]] · "
+        f"📅 {i18n.t('dashboard.calendar')}: `{calendar_file.name}`"
+    )
     dashboard_text = "\n".join(dashboard_lines).replace("{changes_link}", changes_link, 1)
     vault.write_managed_note(dashboard_file, dashboard_text + "\n")
     created_files.insert(0, str(dashboard_file))
@@ -2214,6 +2259,40 @@ def sync_dashboard(
     # O que mudou desde a sincronização anterior (o estado é relido: o download
     # de materiais escreve no mesmo ficheiro durante a sincronização).
     root = vault.vault_root()
+    with state.locked(root, instance):
+        return _record_changes(
+            root,
+            instance,
+            target_dir,
+            changes_name,
+            snapshot,
+            now_str,
+            upcoming_items,
+            dashboard_file,
+            created_files,
+            errors,
+            fullname,
+            synced,
+            len(courses),
+        )
+
+
+def _record_changes(
+    root: Path,
+    instance: str,
+    target_dir: Path,
+    changes_name: str,
+    snapshot: dict[str, Any],
+    now_str: str,
+    upcoming_items: list[tuple[int, str, str, str, str, Any, str]],
+    dashboard_file: Path,
+    created_files: list[str],
+    errors: list[dict[str, str]],
+    fullname: str,
+    synced: int,
+    total: int,
+) -> dict[str, Any]:
+    """Compara com a sincronização anterior, escreve «O que mudou» e grava o estado (sob o lock)."""
     sync_state = state.load(root, instance)
     previous = sync_state.get("snapshot")
     found: list[dict[str, str]] | None = None
@@ -2229,6 +2308,11 @@ def sync_dashboard(
         snapshot=snapshot,
         synced_at=now_str,
         last_changes={"since": since, "at": now_str, "changes": found or [], "first_sync": found is None},
+        deadlines=[
+            {"due": due, "date": date, "course": c, "activity": a, "kind": k, "id": ref, "status": st}
+            for due, date, c, a, k, ref, st in sorted(upcoming_items, key=lambda x: x[0])
+        ],
+        dashboard=dashboard_file.relative_to(root).as_posix(),
     )
     state.save(root, instance, sync_state)
 
@@ -2236,7 +2320,7 @@ def sync_dashboard(
         "status": "ok" if not errors else "parcial",
         "student": fullname,
         "courses_synced": synced,
-        "courses_total": len(courses),
+        "courses_total": total,
         "files_written": created_files,
         "changes_count": len(found or []),
         "errors": errors,
@@ -2245,7 +2329,7 @@ def sync_dashboard(
 
 def _changes_note_name(instance: str) -> str:
     """Nome da nota «O que mudou»; com várias instâncias, uma por instância."""
-    base = "O que mudou no Moodle"
+    base = vault.safe_filename(i18n.t("changes.note_name"))
     return f"{base} ({instance})" if len(config.instances()) > 1 else base
 
 
@@ -2260,9 +2344,9 @@ def _task_lines(items: list[tuple[int, str, str, str, str, Any, str]], now_ts: i
     recent = [item for item in items if item[0] and item[0] >= now_ts - 14 * 86400]
     if not recent:
         return []
-    lines = ["", "## ✅ Tarefas (Obsidian Tasks)", ""]
+    lines = ["", f"## {i18n.t('dashboard.tasks')}", ""]
     for due_ts, _due_str, cname, aname, _kind, _ref, status in sorted(recent, key=lambda x: x[0]):
-        done = status == "submitted" or "post(s) meus" in str(status)
+        done = status == "submitted" or i18n.forum_done(str(status))
         day = datetime.fromtimestamp(due_ts).strftime("%Y-%m-%d")
         text = f"{aname} — {cname}".replace("\n", " ")
         lines.append(f"- [{'x' if done else ' '}] {text} 📅 {day}")
@@ -2272,17 +2356,177 @@ def _task_lines(items: list[tuple[int, str, str, str, str, Any, str]], now_ts: i
 @mcp.tool(annotations=_ann("Ver o que mudou no Moodle", read_only=True))
 def get_recent_changes(
     instance: Inst = DEFAULT_INSTANCE,
-) -> dict[str, Any]:
+) -> RecentChanges:
     """Mostra o que mudou no Moodle entre as duas últimas sincronizações.
 
     Notas lançadas, prazos alterados, trabalhos e testes novos, materiais novos
     e tópicos de fórum novos ou com respostas novas. Não faz pedidos ao Moodle:
     lê o resultado guardado pela última `sync_doctoral_dashboard_to_obsidian`.
     """
+    return RecentChanges.model_validate(recent_changes(instance))
+
+
+def recent_changes(instance: str = DEFAULT_INSTANCE) -> dict[str, Any]:
+    """Implementação de `get_recent_changes`: o último resultado guardado no estado do Vault."""
     last = state.load(vault.vault_root(), (instance or DEFAULT_INSTANCE).strip().lower()).get("last_changes")
     if not isinstance(last, dict):
         return {"changes": [], "message": "Ainda não houve nenhuma sincronização com comparação."}
     return last
+
+
+def _raise_on_error(result: Any) -> dict[str, Any]:
+    """Converte a resposta de erro `{"error": True, "details": ...}` numa exceção.
+
+    As implementações síncronas devolvem esse dicionário (o capturador
+    `moodlemobile://` e os testes leem-no), mas as ferramentas com
+    `outputSchema` têm de devolver o esquema ou um erro MCP (`isError`): um
+    dicionário de erro validado contra o esquema perdia os detalhes.
+    """
+    if isinstance(result, dict) and result.get("error"):
+        details = json.dumps(_redact_secrets(result.get("details")), ensure_ascii=False, default=str)
+        raise RuntimeError(f"O Moodle devolveu um erro: {details[:2000]}")
+    if not isinstance(result, dict):
+        raise RuntimeError(f"Resposta inesperada: {type(result).__name__}")
+    return result
+
+
+# ==============================================================================
+# RESOURCES E PROMPTS
+# ==============================================================================
+#
+# Os resources dão ao cliente o resultado da última sincronização sem pedidos
+# ao Moodle (o utilizador pode anexá-los à conversa); os prompts são fluxos
+# prontos a escolher no cliente. Todo o conteúdo destes resources vem do
+# Moodle (nomes de UCs, de trabalhos e de tópicos escritos por terceiros), por
+# isso cada leitura marca a sessão como tendo visto conteúdo não confiável,
+# tal como uma chamada à API. Os prompts nunca incluem esse conteúdo: chegam
+# ao modelo com o papel de utilizador, e texto de terceiros lá dentro ganharia
+# essa autoridade. Pedem ao modelo que leia o resource ou chame a ferramenta.
+
+_MAX_RESOURCE_BYTES = 1_000_000
+
+
+def _resource_state(instance: str) -> tuple[str, dict[str, Any]]:
+    """Resolve a instância (só nomes configurados) e devolve o seu estado de sincronização."""
+    name = config.resolve_instance(instance).name if (instance or config.instances()) else DEFAULT_INSTANCE
+    confirm.mark_untrusted_content_seen()
+    return name, state.load(vault.vault_root(), name)
+
+
+def _changes_json(instance: str) -> str:
+    name, _data = _resource_state(instance)
+    return json.dumps(recent_changes(name), ensure_ascii=False, indent=1)
+
+
+def _deadlines_json(instance: str) -> str:
+    name, data = _resource_state(instance)
+    deadlines = data.get("deadlines")
+    if not isinstance(deadlines, list):
+        return json.dumps({"instance": name, "deadlines": [], "message": "Ainda não houve sincronização."})
+    now_ts = int(datetime.now().timestamp())
+    upcoming = [d for d in deadlines if isinstance(d, dict) and int(d.get("due") or 0) >= now_ts - 86400]
+    return json.dumps(
+        {"instance": name, "synced_at": data.get("synced_at"), "deadlines": upcoming},
+        ensure_ascii=False,
+        indent=1,
+    )
+
+
+def _dashboard_markdown(instance: str) -> str:
+    _name, data = _resource_state(instance)
+    relative = data.get("dashboard")
+    if not isinstance(relative, str) or not relative:
+        return "Ainda não houve sincronização: corre `sync_doctoral_dashboard_to_obsidian`."
+    path = vault.resolve_in_vault(relative)  # o estado vive no Vault; não confiar no caminho
+    if not path.is_file():
+        return f"O painel `{relative}` já não existe no Vault."
+    with path.open("rb") as handle:
+        return handle.read(_MAX_RESOURCE_BYTES).decode("utf-8", errors="replace")
+
+
+@mcp.resource(
+    "moodle://changes",
+    name="changes",
+    mime_type="application/json",
+    description="O que mudou no Moodle entre as duas últimas sincronizações (instância predefinida).",
+)
+def changes_resource() -> str:
+    """Mudanças da última sincronização."""
+    return _changes_json("")
+
+
+@mcp.resource(
+    "moodle://changes/{instance}",
+    name="changes_by_instance",
+    mime_type="application/json",
+    description="O que mudou no Moodle entre as duas últimas sincronizações de uma instância.",
+)
+def changes_resource_for(instance: str) -> str:
+    """Mudanças da última sincronização de uma instância."""
+    return _changes_json(instance)
+
+
+@mcp.resource(
+    "moodle://deadlines",
+    name="deadlines",
+    mime_type="application/json",
+    description="Prazos (trabalhos, fóruns avaliados, testes) da última sincronização, a partir de ontem.",
+)
+def deadlines_resource() -> str:
+    """Prazos da última sincronização."""
+    return _deadlines_json("")
+
+
+@mcp.resource(
+    "moodle://deadlines/{instance}",
+    name="deadlines_by_instance",
+    mime_type="application/json",
+    description="Prazos da última sincronização de uma instância, a partir de ontem.",
+)
+def deadlines_resource_for(instance: str) -> str:
+    """Prazos da última sincronização de uma instância."""
+    return _deadlines_json(instance)
+
+
+@mcp.resource(
+    "moodle://dashboard",
+    name="dashboard",
+    mime_type="text/markdown",
+    description="A nota do painel no Obsidian, tal como ficou na última sincronização.",
+)
+def dashboard_resource() -> str:
+    """O painel da instância predefinida."""
+    return _dashboard_markdown("")
+
+
+@mcp.resource(
+    "moodle://dashboard/{instance}",
+    name="dashboard_by_instance",
+    mime_type="text/markdown",
+    description="A nota do painel de uma instância, tal como ficou na última sincronização.",
+)
+def dashboard_resource_for(instance: str) -> str:
+    """O painel de uma instância."""
+    return _dashboard_markdown(instance)
+
+
+@mcp.prompt(name="weekly_review", description="Revisão semanal: o que mudou, prazos próximos e um plano.")
+def weekly_review_prompt(instance: str = "") -> str:
+    """Revisão semanal do Moodle."""
+    where = i18n.t("prompt.where", instance=instance) if instance else ""
+    return i18n.t("prompt.weekly", where=where) + i18n.t("prompt.untrusted")
+
+
+@mcp.prompt(name="prepare_assignment", description="Preparar um trabalho ou e-fólio de uma UC.")
+def prepare_assignment_prompt(course_id: int) -> str:
+    """Preparação de um trabalho."""
+    return i18n.t("prompt.assignment", course_id=int(course_id)) + i18n.t("prompt.untrusted")
+
+
+@mcp.prompt(name="forum_catch_up", description="Pôr-me a par dos fóruns de uma UC.")
+def forum_catch_up_prompt(course_id: int) -> str:
+    """Resumo dos fóruns de uma UC."""
+    return i18n.t("prompt.forums", course_id=int(course_id)) + i18n.t("prompt.untrusted")
 
 
 # ==============================================================================
@@ -2422,12 +2666,29 @@ def strip_schema_titles() -> int:
     removed = 0
     for tool in _iter_registered_tools():
         schema = getattr(tool, "parameters", None)
-        if not isinstance(schema, dict):
-            continue
-        removed += 1 if schema.pop("title", None) is not None else 0
-        for field_schema in schema.get("properties", {}).values():
-            if isinstance(field_schema, dict):
-                removed += 1 if field_schema.pop("title", None) is not None else 0
+        if isinstance(schema, dict):
+            removed += 1 if schema.pop("title", None) is not None else 0
+            for field_schema in schema.get("properties", {}).values():
+                if isinstance(field_schema, dict):
+                    removed += 1 if field_schema.pop("title", None) is not None else 0
+        output = getattr(getattr(tool, "fn_metadata", None), "output_schema", None)
+        if isinstance(output, dict):
+            removed += _strip_titles(output)
+    return removed
+
+
+def _strip_titles(node: Any) -> int:
+    """Remove recursivamente os `title` (texto) de um esquema JSON; devolve quantos removeu."""
+    removed = 0
+    if isinstance(node, dict):
+        if isinstance(node.get("title"), str):
+            del node["title"]
+            removed += 1
+        for value in node.values():
+            removed += _strip_titles(value)
+    elif isinstance(node, list):
+        for value in node:
+            removed += _strip_titles(value)
     return removed
 
 
@@ -2490,6 +2751,58 @@ def apply_toolsets(enabled: set[str]) -> list[str]:
                 raise RuntimeError(f"Não foi possível retirar a ferramenta '{tool_name}': {exc}") from exc
             removed.append(tool_name)
     return sorted(removed)
+
+
+def run_sync(instance: str = "", materials: bool = False) -> int:
+    """Sincroniza sem cliente MCP (usado por `--sync` e pela tarefa agendada).
+
+    Escreve um resumo em `last_sync.log`, na pasta de configuração, para que
+    uma falha da tarefa agendada se possa ver sem abrir o journal do sistema.
+
+    Returns:
+        0 se tudo correu bem, 1 se alguma UC ou instância falhou.
+    """
+    if not vault.vault_root().is_dir():
+        # Sem isto, um Vault mal configurado (p.ex. só no env do cliente MCP) fazia
+        # a tarefa agendada criar e encher uma pasta que o estudante nunca abre.
+        logger.error(
+            "O Vault %s não existe; não sincronizo. Ver `moodle-mcp --show-config`.", vault.vault_root()
+        )
+        return 1
+    names = [instance] if instance else [n for n, inst in config.instances().items() if inst.token]
+    if not names:
+        logger.error("Nenhuma instância com token. Faz `moodle-mcp --login` primeiro.")
+        return 1
+    status = 0
+    lines = []
+    for name in names:
+        stamp = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+        try:
+            result = sync_dashboard(instance=name, download_materials=materials)
+        except Exception as exc:  # registar e seguir para a instância seguinte
+            text = str(_redact_secrets(f"{type(exc).__name__}: {exc}"))
+            lines.append(f"[{stamp}] {name}: ERRO {text}")
+            status = 1
+            continue
+        if result.get("error"):
+            lines.append(
+                f"[{stamp}] {name}: ERRO {json.dumps(_redact_secrets(result.get('details')), default=str)[:500]}"
+            )
+            status = 1
+            continue
+        failed = len(result.get("errors", []))
+        status = status or (1 if failed else 0)
+        lines.append(
+            f"[{stamp}] {name}: {result['courses_synced']}/{result['courses_total']} UCs, "
+            f"{result['changes_count']} mudanças, {failed} erros"
+        )
+    for line in lines:
+        print(line)
+    try:
+        config.write_private(config.config_dir() / "last_sync.log", "\n".join(lines) + "\n")
+    except OSError:
+        logger.warning("Não foi possível escrever last_sync.log.", exc_info=True)
+    return status
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -2573,8 +2886,48 @@ def main(argv: list[str] | None = None) -> int:
             f"Chaves: {', '.join(config.SETTINGS)}, ou instances.<nome>.url para uma instância (https)."
         ),
     )
+    parser.add_argument(
+        "--sync",
+        nargs="?",
+        const="",
+        metavar="INSTÂNCIA",
+        help="Sincroniza o painel sem cliente MCP (todas as instâncias com token, ou só a indicada) e termina.",
+    )
+    parser.add_argument(
+        "--materials", action="store_true", help="Com --sync/--schedule: descarrega também os materiais."
+    )
+    parser.add_argument(
+        "--schedule",
+        nargs="?",
+        const=6,
+        type=int,
+        metavar="HORAS",
+        help="Agenda `--sync` no sistema (systemd, launchd ou Agendador de Tarefas) a cada HORAS (omissão 6).",
+    )
+    parser.add_argument(
+        "--unschedule", action="store_true", help="Remove a sincronização agendada e termina."
+    )
     parser.add_argument("--version", action="version", version=f"moodle-mcp {__version__}")
     args = parser.parse_args(argv)
+
+    if args.schedule is not None or args.unschedule:
+        try:
+            result = (
+                schedule.uninstall() if args.unschedule else schedule.install(args.schedule, args.materials)
+            )
+        except schedule.ScheduleError as exc:
+            parser.error(str(exc))
+        for key, value in result.items():
+            print(f"{key}: {', '.join(value) if isinstance(value, list) else value}")
+        if not args.unschedule:
+            print(
+                "\nA tarefa usa o Vault acima. Se não for o teu, grava-o com "
+                "`moodle-mcp --set obsidian_vault_dir=<pasta>` e volta a correr --schedule."
+            )
+        return 0
+
+    if args.sync is not None:
+        return run_sync(args.sync, args.materials)
 
     if args.install_handler or args.uninstall_handler:
         try:

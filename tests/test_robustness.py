@@ -309,7 +309,7 @@ def test_sync_isolates_failing_courses_and_reports_them(fake_moodle, vault):
     assert any(i.endswith(": testes") for i in items)
     notes = sorted(p.name for p in (vault / "Unidades Curriculares").iterdir())
     assert notes == ["Ética (2).md", "Ética.md"]  # nomes iguais já não se sobrescrevem
-    dashboard = (vault / "Doutoramento - Painel Moodle.md").read_text(encoding="utf-8")
+    dashboard = (vault / "Painel Moodle.md").read_text(encoding="utf-8")
     assert "Ética (2)\\|Abrir UC" in dashboard and "Avariada" not in dashboard
 
 

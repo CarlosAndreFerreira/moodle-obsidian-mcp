@@ -107,11 +107,11 @@ def test_sync_keeps_what_the_student_wrote(vault, monkeypatch):
     monkeypatch.setattr(server, "get_course_contents", lambda *a, **k: [])
 
     server.sync_dashboard(instance="test")
-    for path in (vault / "Unidades Curriculares" / "UC.md", vault / "Doutoramento - Painel Moodle.md"):
+    for path in (vault / "Unidades Curriculares" / "UC.md", vault / "Painel Moodle.md"):
         path.write_text(path.read_text(encoding="utf-8") + "\nNOTA PESSOAL\n", encoding="utf-8")
     server.sync_dashboard(instance="test")
 
-    for path in (vault / "Unidades Curriculares" / "UC.md", vault / "Doutoramento - Painel Moodle.md"):
+    for path in (vault / "Unidades Curriculares" / "UC.md", vault / "Painel Moodle.md"):
         assert "NOTA PESSOAL" in path.read_text(encoding="utf-8"), path.name
 
 
@@ -206,3 +206,14 @@ def test_unreadable_state_means_download_everything(vault, monkeypatch):
     server.download_course_materials(5, extract_pdfs=False, instance="test")
     state.state_file(vault, "test").write_text("{corrompido", encoding="utf-8")
     assert server.download_course_materials(5, extract_pdfs=False, instance="test")["downloaded_count"] == 2
+
+
+def test_switching_language_replaces_the_block_once(vault, monkeypatch):
+    note = vault / "UC.md"
+    vaultlib.write_managed_note(note, _generated("v1"))
+    note.write_text(note.read_text(encoding="utf-8") + "\nNOTA PESSOAL\n", encoding="utf-8")
+    monkeypatch.setenv("MOODLE_MCP_LANGUAGE", "en")
+    vaultlib.write_managed_note(note, _generated("v2"))
+    out = note.read_text(encoding="utf-8")
+    assert out.count("moodle-mcp:start") == 1 and out.count(vaultlib.MANAGED_END) == 1
+    assert "replaced on each sync" in out and "Conteúdo v2" in out and "NOTA PESSOAL" in out

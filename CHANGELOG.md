@@ -28,6 +28,30 @@ o projeto segue [versionamento semântico](https://semver.org/lang/pt/) (antes d
   (`timemodified` e tamanho iguais) e ainda estão no Vault não voltam a ser
   descarregados. O estado fica em `.moodle-mcp/state-<instância>.json`, no
   Vault. O resultado ganha `unchanged_count`.
+- **Sincronização agendada:** `moodle-mcp --sync` sincroniza sem cliente MCP
+  (todas as instâncias com token, ou a indicada; `--materials` para descarregar
+  também os materiais) e escreve `last_sync.log`. `moodle-mcp --schedule
+  [HORAS]` regista-o no agendador do sistema: timer do systemd de utilizador
+  (`Persistent=true`), LaunchAgent no macOS ou tarefa do Agendador de Tarefas
+  no Windows. `--unschedule` remove-o. Nenhum token entra nos ficheiros da
+  tarefa nem na linha de comandos.
+- **Notas em inglês ou português:** opção `language` (`MOODLE_MCP_LANGUAGE`,
+  `pt` por omissão). Muda o texto do painel, das notas das UCs, de «O que
+  mudou», das tarefas, do calendário e dos prompts. As pastas e as chaves
+  internas (tipo de mudança, UID dos eventos) não mudam, para que mudar de
+  língua não volte a descarregar materiais nem duplique eventos.
+- Opção `courses_dir` (`MOODLE_MCP_COURSES_DIR`) para a pasta das notas das UCs.
+- **Resources MCP:** `moodle://changes`, `moodle://deadlines` e
+  `moodle://dashboard` (e `…/{instance}`), com o resultado da última
+  sincronização, sem pedidos ao Moodle. Cada leitura conta como conteúdo de
+  terceiros para o modo `confirm_writes=untrusted`.
+- **Prompts MCP:** `weekly_review`, `prepare_assignment` e `forum_catch_up`.
+  Não levam conteúdo do Moodle (chegariam ao modelo com a autoridade do
+  utilizador): só os passos, que leem esse conteúdo pelas ferramentas.
+- **Respostas estruturadas:** a sincronização, `get_recent_changes`, o
+  download de materiais e a exportação de fóruns declaram um `outputSchema`.
+  Um erro do Moodle nestas ferramentas passa a ser um erro MCP (`isError`),
+  com os segredos retirados.
 
 ### Segurança
 - O estado «esta sessão já leu conteúdo de terceiros», usado pelo modo
@@ -40,6 +64,17 @@ o projeto segue [versionamento semântico](https://semver.org/lang/pt/) (antes d
   `onnxruntime`, do `numpy` e do `pymupdf4llm`, que o projeto não usa: a
   instalação desce de cerca de 280 MB para cerca de 90 MB. A série 1.x continua
   mantida.
+- O painel deixa de se chamar «Doutoramento - Painel Moodle» por omissão: um
+  Vault que já tenha essa nota continua a usá-la; um Vault novo recebe «Painel
+  Moodle» (ou «Moodle Dashboard» em inglês). `dashboard_name` continua a
+  mandar.
+- Um lock entre processos protege a gravação do estado do Vault: uma
+  sincronização agendada e outra pedida no cliente ao mesmo tempo já não
+  apagam o registo uma da outra.
+
+### Corrigido
+- Um teste do handler podia falhar ao ler o `/proc` do processo entre o
+  `fork` e o `exec`.
 
 ## [0.7.2] — 2026-11-08
 

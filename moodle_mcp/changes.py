@@ -13,16 +13,20 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+from moodle_mcp.i18n import t
+
 #: Módulos que não são conteúdo (texto solto na página da UC).
 _IGNORED_MODULES = frozenset({"label"})
 _EMPTY_GRADES = frozenset({"", "-", "—"})
+#: Chave do total da UC no retrato (a das versões anteriores, para continuar a comparar).
+COURSE_TOTAL_KEY = "Total da Disciplina"
 
 
 def _when(ts: Any) -> str:
     try:
-        return datetime.fromtimestamp(int(ts)).strftime("%Y-%m-%d %H:%M") if int(ts) else "sem prazo"
+        return datetime.fromtimestamp(int(ts)).strftime("%Y-%m-%d %H:%M") if int(ts) else t("changes.no_due")
     except (TypeError, ValueError, OSError):
-        return "sem prazo"
+        return t("changes.no_due")
 
 
 def diff(previous: dict[str, Any], current: dict[str, Any]) -> list[dict[str, str]]:
@@ -47,50 +51,60 @@ def diff(previous: dict[str, Any], current: dict[str, Any]) -> list[dict[str, st
         name = str(now.get("name") or cid)
         before = previous.get(cid)
         if not isinstance(before, dict):
-            add(name, "uc", "UC nova na tua lista de disciplinas")
+            add(name, "uc", t("changes.new_course"))
             continue
 
         for item, grade in now.get("grades", {}).items():
             old = before.get("grades", {}).get(item)
             if grade not in _EMPTY_GRADES and grade != old:
-                add(
-                    name,
-                    "nota",
-                    f"{item}: {grade}" + (f" (antes: {old})" if old not in (None, *_EMPTY_GRADES) else ""),
-                )
+                before_text = t("changes.grade_before", old=old) if old not in (None, *_EMPTY_GRADES) else ""
+                label = t("course.total") if item == COURSE_TOTAL_KEY else item
+                add(name, "nota", t("changes.grade", item=label, grade=grade) + before_text)
 
         for aid, task in now.get("assignments", {}).items():
             old = before.get("assignments", {}).get(aid)
             if not old:
-                add(name, "trabalho", f"Trabalho novo: {task.get('name')} (prazo {_when(task.get('due'))})")
+                add(
+                    name,
+                    "trabalho",
+                    t("changes.new_assignment", name=task.get("name"), due=_when(task.get("due"))),
+                )
                 continue
             if task.get("due") != old.get("due"):
                 moved = f"{_when(old.get('due'))} → {_when(task.get('due'))}"
-                add(name, "prazo", f"Prazo de «{task.get('name')}» mudou: {moved}")
+                add(name, "prazo", t("changes.due_moved", name=task.get("name"), moved=moved))
             if task.get("status") != old.get("status"):
-                add(name, "submissão", f"«{task.get('name')}»: {old.get('status')} → {task.get('status')}")
+                add(
+                    name,
+                    "submissão",
+                    t("changes.status", name=task.get("name"), old=old.get("status"), new=task.get("status")),
+                )
 
         for cmid, module in now.get("modules", {}).items():
             if module.get("type") in _IGNORED_MODULES or cmid in before.get("modules", {}):
                 continue
-            add(name, "material", f"Novo na página da UC: {module.get('name')} ({module.get('type')})")
+            add(name, "material", t("changes.new_module", name=module.get("name"), type=module.get("type")))
 
         for did, disc in now.get("discussions", {}).items():
             old = before.get("discussions", {}).get(did)
             where = f"{disc.get('forum')}: «{disc.get('name')}»"
             if not old:
-                author = f" de {disc['author']}" if disc.get("author") else ""
-                add(name, "fórum", f"Tópico novo{author} em {where}")
+                author = t("changes.by", author=disc["author"]) if disc.get("author") else ""
+                add(name, "fórum", t("changes.new_topic", author=author, where=where))
             elif int(disc.get("modified") or 0) > int(old.get("modified") or 0):
-                add(name, "fórum", f"Respostas novas em {where}")
+                add(name, "fórum", t("changes.replies", where=where))
 
         for cmid, quiz in now.get("quizzes", {}).items():
             old = before.get("quizzes", {}).get(cmid)
             if not old:
-                add(name, "teste", f"Teste novo: {quiz.get('name')} (fecha {_when(quiz.get('close'))})")
+                add(
+                    name,
+                    "teste",
+                    t("changes.new_quiz", name=quiz.get("name"), close=_when(quiz.get("close"))),
+                )
             elif quiz.get("close") != old.get("close"):
                 moved = f"{_when(old.get('close'))} → {_when(quiz.get('close'))}"
-                add(name, "prazo", f"Fecho de «{quiz.get('name')}» mudou: {moved}")
+                add(name, "prazo", t("changes.close_moved", name=quiz.get("name"), moved=moved))
 
     return found
 
@@ -113,16 +127,16 @@ def render(changes: list[dict[str, str]] | None, since: str, now: str) -> str:
         f"updated: {now}",
         "---",
         "",
-        "# 🔔 O que mudou no Moodle",
+        f"# {t('changes.heading')}",
         "",
     ]
     if changes is None:
-        lines.append(f"Primeira sincronização ({now}): a partir da próxima, aparece aqui o que mudou.")
+        lines.append(t("changes.first_sync", now=now))
         return "\n".join(lines) + "\n"
-    lines.append(f"Desde {since} até {now}.")
+    lines.append(t("changes.range", since=since, now=now))
     lines.append("")
     if not changes:
-        lines.append("_Nada de novo._")
+        lines.append(t("changes.nothing"))
         return "\n".join(lines) + "\n"
     icons = {
         "nota": "📊",
