@@ -38,7 +38,10 @@ dependencies = [
 [project.optional-dependencies]
 # O PyMuPDF é AGPL-3.0 e é viral: fica como extra para que instalar o servidor
 # não imponha a licença a quem não precise da extração de texto de PDFs.
-pdf = ["pymupdf>=1.24.0"]
+# Limitado à série 1.x: a 2.x (out. 2026) passou a depender do onnxruntime,
+# numpy e pymupdf4llm (~250 MB a mais), que este projeto não usa — só chama
+# get_text(). A 1.x continua mantida; rever quando a 2.x amadurecer.
+pdf = ["pymupdf>=1.24.0,<2"]
 dev = ["pytest>=8.0", "responses>=0.25", "ruff>=0.6", "mypy>=1.11", "hypothesis>=6.100"]
 
 [project.scripts]

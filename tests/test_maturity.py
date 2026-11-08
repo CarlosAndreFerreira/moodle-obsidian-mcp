@@ -106,3 +106,50 @@ def test_participants_only_expose_what_is_needed():
     result = server.get_course_participants(3, instance="test")
     assert result == [{"id": 7, "fullname": "Colega", "roles": ["student"], "groups": ["Grupo A"]}]
     assert "colega@exemplo.pt" not in json.dumps(result)
+
+
+# ------------------------------------------------------------------------------
+# Conteúdo não confiável é contado por sessão, não por processo
+# ------------------------------------------------------------------------------
+
+
+@responses.activate
+def test_untrusted_content_is_tracked_per_session(monkeypatch):
+    """Dois clientes no mesmo servidor: só quem leu posts tem de confirmar."""
+    from mcp import types
+    from mcp.shared.memory import create_connected_server_and_client_session as connect
+
+    monkeypatch.setenv("MOODLE_MCP_CONFIRM_WRITES", "untrusted")
+    server.offload_blocking_tools()
+
+    def reply(request):
+        if "core_user_get_users_by_field" in request.body:
+            return 200, {}, json.dumps([{"id": 42, "fullname": "Prof. Ana"}])
+        if "mod_forum_get_discussion_posts" in request.body:
+            return 200, {}, json.dumps({"posts": [{"id": 1, "message": "olá"}]})
+        return 200, {}, json.dumps([{"msgid": 1}])
+
+    responses.add_callback(responses.POST, REST, callback=reply)
+    prompts: dict[str, int] = {"leitor": 0, "outro": 0}
+
+    def answering(name):
+        async def callback(context, params):
+            prompts[name] += 1
+            return types.ElicitResult(action="accept", content={"confirmar": True})
+
+        return callback
+
+    send = {"to_user_id": 42, "text": "olá", "instance": "test"}
+
+    async def scenario():
+        async with connect(server.mcp._mcp_server, elicitation_callback=answering("leitor")) as reader:
+            async with connect(server.mcp._mcp_server, elicitation_callback=answering("outro")) as other:
+                await reader.call_tool("get_discussion_posts", {"discussion_id": 1, "instance": "test"})
+                assert not (await other.call_tool("send_instant_message", send)).isError
+                assert not (await reader.call_tool("send_instant_message", send)).isError
+
+    # Ferramentas de escrita não estão no toolset por omissão do servidor de testes,
+    # mas estão registadas; o servidor em memória expõe-nas todas.
+    asyncio.run(scenario())
+    assert prompts == {"leitor": 1, "outro": 0}
+    assert confirm.untrusted_content_seen is False  # nada vazou para o estado global

@@ -10,6 +10,10 @@ updates:
       # mcp<2.0.0 até essa migração ser feita; as versões 1.x continuam a vir.
       - dependency-name: mcp
         update-types: ["version-update:semver-major"]
+      # O pyproject.toml limita o pymupdf a <2 (a 2.x traz ~250 MB de
+      # dependências que não usamos); as atualizações 1.x continuam a vir.
+      - dependency-name: pymupdf
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: github-actions
     directory: /
     schedule:
