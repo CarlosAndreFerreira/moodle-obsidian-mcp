@@ -4,7 +4,7 @@ Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-PT/1.1.0/);
 o projeto segue [versionamento semântico](https://semver.org/lang/pt/) (antes da
 1.0, uma versão menor pode mudar comportamento).
 
-## [Por publicar]
+## [0.8.0] — 2026-11-08
 
 ### Adicionado
 - **O que mudou:** cada sincronização guarda um retrato de cada UC (notas,
@@ -199,6 +199,7 @@ o projeto segue [versionamento semântico](https://semver.org/lang/pt/) (antes d
 - `set_moodle_token` valida antes de gravar e não muda o URL de uma instância.
 - As ferramentas que gravam credenciais (`auth`) ficam desligadas por omissão.
 
+[0.8.0]: https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp/compare/v0.7.2...v0.8.0
 [0.7.2]: https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp/compare/v0.6.0...v0.7.0

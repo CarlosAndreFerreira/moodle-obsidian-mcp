@@ -116,6 +116,7 @@ def test_task_lines_format_and_window():
 @pytest.fixture
 def evolving_moodle(monkeypatch, vault):
     data = {"grade": "—", "discussions": [{"discussion": 500, "name": "Dúvidas", "timemodified": 10}]}
+    due = int(time.time()) + 86400  # fixo: recalculado em cada chamada, mudava entre sincronizações
 
     def call(wsfunction, params=None, method="POST", instance="test"):
         if wsfunction == "core_webservice_get_site_info":
@@ -135,7 +136,7 @@ def evolving_moodle(monkeypatch, vault):
             "courses": [
                 {
                     "id": 1,
-                    "assignments": [{"id": 10, "name": "e-fólio A", "duedate": int(time.time()) + 86400}],
+                    "assignments": [{"id": 10, "name": "e-fólio A", "duedate": due}],
                 }
             ]
         },
