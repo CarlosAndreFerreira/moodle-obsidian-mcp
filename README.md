@@ -1,15 +1,16 @@
 # moodle-mcp
 
+[![PyPI](https://img.shields.io/pypi/v/moodle-obsidian-mcp)](https://pypi.org/project/moodle-obsidian-mcp/)
+[![Python](https://img.shields.io/pypi/pyversions/moodle-obsidian-mcp)](https://pypi.org/project/moodle-obsidian-mcp/)
 [![CI](https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp/actions/workflows/ci.yml)
-![Python](https://img.shields.io/badge/python-3.11%2B-blue)
-![License](https://img.shields.io/badge/license-MIT-green)
+[![License](https://img.shields.io/badge/license-MIT-green)](https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp/blob/main/LICENSE)
 ![MCP](https://img.shields.io/badge/MCP-server-purple)
 
 A **Model Context Protocol** server that gives AI assistants (Claude, opencode, any MCP client) safe access to **Moodle**, and syncs your courses, grades, deadlines and materials into an **Obsidian** vault.
 
 Works with any Moodle that has Web Services and the mobile app service enabled — **including universities behind federated SSO** (Entra ID, SAML, Shibboleth, CAS), where students can't generate an API token by hand.
 
-🇵🇹 [Versão em português](README.pt.md)
+🇵🇹 [Versão em português](https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp/blob/main/README.pt.md)
 
 ---
 
@@ -27,7 +28,7 @@ Most MCP servers for third-party platforms pipe untrusted content straight into 
 
 ## Features
 
-- **SSO token capture** — a `moodlemobile://` URL handler intercepts the mobile-app login redirect from your browser, decodes the token and stores it (`0600`). Registered natively on Linux (`xdg-mime`), Windows (`HKEY_CURRENT_USER`, no admin) and macOS (Launch Services). The token never passes through the model.
+- **SSO token capture** — `moodle-mcp --login` starts the mobile-app login in your browser with a single-use passport; a `moodlemobile://` URL handler receives the redirect, checks Moodle's signature and stores the token (`0600`). Registered natively on Linux (`xdg-mime`), Windows (`HKEY_CURRENT_USER`, no admin) and macOS (an AppleScript applet registered with Launch Services). The token never passes through the model.
 - **Obsidian dashboard sync** — a central note with every course, progress, current grades and a sorted deadline calendar; one note per course with grade report, per-assignment submission status, assignment briefs converted to Markdown and the resource tree.
 - **Course material download** — PDFs, slides and HTML pages saved into the vault, with each PDF converted to a searchable `.pdf.md` that agents can read (optional `[pdf]` extra).
 - **32 tools** across courses, books and pages, completion, grades, assignments and submissions, quizzes, forums (search, export to Obsidian, reply), messages and calendar.
@@ -35,36 +36,27 @@ Most MCP servers for third-party platforms pipe untrusted content straight into 
 
 ## Install
 
-```bash
-uvx --from git+https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp moodle-mcp --show-config
-```
-
-or from a clone:
+The package is on PyPI as [`moodle-obsidian-mcp`](https://pypi.org/project/moodle-obsidian-mcp/); it installs two commands, `moodle-mcp` and `moodle-mcp-token-catcher`.
 
 ```bash
-git clone https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp.git
-cd moodle-obsidian-mcp
-uv pip install -e ".[pdf]"
+uv tool install "moodle-obsidian-mcp[pdf]"     # or: pipx install "moodle-obsidian-mcp[pdf]"
+moodle-mcp --install-handler                    # once: register the moodlemobile:// handler
+moodle-mcp --login                              # log in through your browser (SSO works)
 ```
 
-The `moodlemobile://` handler needs a permanent install (`uvx` runs from a cache that can be wiped):
+Upgrade with `uv tool upgrade moodle-obsidian-mcp` (or `pipx upgrade moodle-obsidian-mcp`).
+
+Use a permanent install (`uv tool` or `pipx`) rather than `uvx`: the login handler is registered with the executable's path, and `uvx` runs from a cache that can be wiped. To try it without installing:
 
 ```bash
-uv tool install "moodle-obsidian-mcp[pdf] @ git+https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp"
+uvx --from moodle-obsidian-mcp moodle-mcp --show-config
 ```
 
-From a clone, `./install.sh [vault-path]` does the permanent install (`uv tool install`, or `pipx`), sets the vault, registers the handler and tells you to run `moodle-mcp --login`.
-
-The distribution is named `moodle-obsidian-mcp` (`moodle-mcp` is taken on PyPI); the commands are still `moodle-mcp` and `moodle-mcp-token-catcher`.
+From a clone, `./install.sh [vault-path]` does the permanent install, sets the vault, registers the handler and tells you to run `moodle-mcp --login`. For development, see [Development](#development).
 
 The `[pdf]` extra adds PDF text extraction via PyMuPDF. It's kept out of the base install because PyMuPDF is **AGPL-3.0**; without it everything works, PDF downloads just don't get the companion `.md`.
 
-Register the `moodlemobile://` handler (needed for SSO login):
-
-```bash
-moodle-mcp --install-handler
-moodle-mcp --uninstall-handler
-```
+`moodle-mcp --uninstall-handler` removes the `moodlemobile://` handler again.
 
 ## Reliability
 
@@ -138,6 +130,8 @@ Unnamed `MOODLE_URL` / `MOODLE_TOKEN` still work as the default instance, but on
 
 ## Client setup
 
+If the client doesn't inherit your shell's `PATH`, use the absolute path of `moodle-mcp` as the command (`~/.local/bin/moodle-mcp` with `uv tool` or `pipx` on Linux and macOS; see `uv tool dir --bin`).
+
 **Claude Code / Claude Desktop** (`mcpServers`):
 
 ```json
@@ -184,6 +178,8 @@ The handler only accepts the response to a login started this way: Moodle signs 
 ## Development
 
 ```bash
+git clone https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp.git
+cd moodle-obsidian-mcp
 uv pip install -e ".[dev,pdf]"
 ruff check moodle_mcp tests && ruff format --check moodle_mcp tests
 mypy moodle_mcp
@@ -192,12 +188,12 @@ pytest
 
 The test suite covers token safety (credential confinement, cross-host refusal), prompt-injection sanitisation, resilience and robustness, plus Hypothesis property tests for file names, URL validation and content sanitisation. The base modules (`config`, `confirm`, `login`, `sanitize`, `transport`, `vault`) are type-checked with strict mypy flags. CI runs lint, mypy, `uv lock --check` and tests on Linux, Windows and macOS (Python 3.11–3.13), plus `pip-audit`.
 
-Releases are published to PyPI from a `vX.Y.Z` tag via trusted publishing (no stored token) with provenance attestations; see [CHANGELOG.md](CHANGELOG.md).
+Releases are published to PyPI from a `vX.Y.Z` tag via trusted publishing (no stored token) with provenance attestations: bump the version in `pyproject.toml` and `moodle_mcp/__init__.py`, add a [CHANGELOG](https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp/blob/main/CHANGELOG.md) entry, merge, push the tag and approve the `pypi` deployment.
 
 ## Security
 
-Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md) — never in public issues or group chats.
+Report vulnerabilities privately as described in [SECURITY.md](https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp/blob/main/SECURITY.md) — never in public issues or group chats.
 
 ## License
 
-MIT — see [LICENSE](LICENSE). The optional `[pdf]` extra installs PyMuPDF, which is **AGPL-3.0** and carries its own obligations.
+MIT — see [LICENSE](https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp/blob/main/LICENSE). The optional `[pdf]` extra installs PyMuPDF, which is **AGPL-3.0** and carries its own obligations.

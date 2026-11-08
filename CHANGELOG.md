@@ -4,6 +4,16 @@ Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-PT/1.1.0/);
 o projeto segue [versionamento semântico](https://semver.org/lang/pt/) (antes da
 1.0, uma versão menor pode mudar comportamento).
 
+## [0.7.1] — 2026-11-08
+
+### Alterado
+- Documentação: instalação a partir do PyPI (`uv tool install "moodle-obsidian-mcp[pdf]"`),
+  atualização com `uv tool upgrade`, e links absolutos para o GitHub (os relativos
+  não funcionavam na página do PyPI).
+- Metadados do pacote: descrição em inglês e sem referências a universidades
+  específicas, classifiers, keywords e links para o repositório, issues,
+  changelog e política de segurança.
+
 ## [0.7.0] — 2026-11-08
 
 ### Adicionado
@@ -101,6 +111,7 @@ o projeto segue [versionamento semântico](https://semver.org/lang/pt/) (antes d
 - `set_moodle_token` valida antes de gravar e não muda o URL de uma instância.
 - As ferramentas que gravam credenciais (`auth`) ficam desligadas por omissão.
 
+[0.7.1]: https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp/compare/v0.4.0...v0.5.0
