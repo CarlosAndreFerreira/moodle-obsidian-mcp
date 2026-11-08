@@ -85,6 +85,38 @@ SECRETS: dict[str, str] = {}
 #: Nome usado quando há um `MOODLE_URL` sem nome de instância associado.
 FALLBACK_INSTANCE = "default"
 
+#: Opções do plugin do Claude (`userConfig`) -> variável que o servidor lê.
+#:
+#: O diretório de plugins da Anthropic só aceita passar uma opção ao servidor
+#: numa variável chamada `CLAUDE_PLUGIN_OPTION_<CHAVE>`. Estas são traduzidas
+#: para as variáveis de sempre na importação, antes de qualquer módulo as ler.
+#: Uma variável já definida (pelo utilizador ou por outro cliente MCP) ganha.
+PLUGIN_OPTIONS: dict[str, str] = {
+    "CLAUDE_PLUGIN_OPTION_VAULT_DIR": "OBSIDIAN_VAULT_DIR",
+    "CLAUDE_PLUGIN_OPTION_LANGUAGE": "MOODLE_MCP_LANGUAGE",
+    "CLAUDE_PLUGIN_OPTION_MOODLE_URL": "MOODLE_URL",
+    "CLAUDE_PLUGIN_OPTION_MOODLE_TOKEN": "MOODLE_TOKEN",
+}
+
+
+def apply_plugin_options(environ: Any = os.environ) -> list[str]:
+    """Copia as opções do plugin do Claude para as variáveis que o servidor lê.
+
+    Returns:
+        Os nomes das variáveis preenchidas.
+
+    """
+    filled = []
+    for source, target in PLUGIN_OPTIONS.items():
+        value = (environ.get(source) or "").strip()
+        if value and not (environ.get(target) or "").strip():
+            environ[target] = value
+            filled.append(target)
+    return filled
+
+
+apply_plugin_options()
+
 #: Prefixos de ambiente que configuram o servidor e não uma instância.
 _RESERVED_ENV_PREFIXES = ("MOODLE_MCP_", "MOODLE_DEFAULT_")
 

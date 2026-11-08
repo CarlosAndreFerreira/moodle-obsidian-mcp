@@ -51,13 +51,24 @@ def test_claude_plugin_pins_the_released_version():
     version = moodle_mcp.__version__
     assert manifest["version"] == version
     assert servers["moodle"]["command"] == "uvx"
-    assert servers["moodle"]["args"] == [f"moodle-obsidian-mcp[pdf]=={version}"]
+    # Só `uvx <pacote>==<versão>`: o diretório recusa `[pdf]` (lido como glob) e outras opções.
+    assert servers["moodle"]["args"] == [f"moodle-obsidian-mcp=={version}"]
 
 
 def test_claude_plugin_only_references_declared_options():
     manifest, servers = _plugin()
     used = set(re.findall(r"\$\{user_config\.(\w+)\}", json.dumps(servers)))
     assert used <= set(manifest["userConfig"])
+    # O diretório recusa `options` numa opção usada em `${user_config.…}`.
+    assert not any("options" in manifest["userConfig"][key] for key in used)
+    # E só aceita passar opções ao servidor com nomes CLAUDE_PLUGIN_OPTION_<CHAVE>,
+    # que o servidor traduz (config.PLUGIN_OPTIONS).
+    from moodle_mcp import config
+
+    env = servers["moodle"]["env"]
+    assert set(env) <= set(config.PLUGIN_OPTIONS)
+    for name, value in env.items():
+        assert value == "${user_config." + name.removeprefix("CLAUDE_PLUGIN_OPTION_").lower() + "}"
     assert manifest["userConfig"]["moodle_token"].get("sensitive") is True
 
 
@@ -65,3 +76,18 @@ def test_claude_plugin_readme_is_long_enough():
     readme = (ROOT / "plugin" / "README.md").read_text(encoding="utf-8")
     prose = re.sub(r"```.*?```", "", readme, flags=re.DOTALL)
     assert len(prose.split()) >= 40 and (ROOT / "plugin" / "LICENSE").exists()
+
+
+def test_plugin_options_fill_the_server_variables_without_overriding():
+    from moodle_mcp import config
+
+    env = {
+        "CLAUDE_PLUGIN_OPTION_VAULT_DIR": "/v",
+        "CLAUDE_PLUGIN_OPTION_LANGUAGE": "en",
+        "CLAUDE_PLUGIN_OPTION_MOODLE_TOKEN": "",
+        "MOODLE_MCP_LANGUAGE": "pt",
+    }
+    assert config.apply_plugin_options(env) == ["OBSIDIAN_VAULT_DIR"]
+    assert env["OBSIDIAN_VAULT_DIR"] == "/v"
+    assert env["MOODLE_MCP_LANGUAGE"] == "pt"  # definida pelo utilizador: ganha
+    assert "MOODLE_TOKEN" not in env  # opção vazia não cria nada

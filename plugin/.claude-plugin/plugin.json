@@ -1,7 +1,7 @@
 {
   "name": "moodle-obsidian",
   "displayName": "Moodle + Obsidian",
-  "version": "0.8.1",
+  "version": "0.8.2",
   "description": "Your Moodle courses, grades, deadlines and forums in Claude, synced into an Obsidian vault. Works with SSO universities.",
   "author": {
     "name": "Carlos André Ferreira",
@@ -30,11 +30,7 @@
     "language": {
       "type": "string",
       "title": "Note language",
-      "description": "Language of the generated notes.",
-      "options": [
-        "en",
-        "pt"
-      ],
+      "description": "Language of the generated notes: en or pt.",
       "default": "en"
     },
     "moodle_url": {
