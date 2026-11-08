@@ -152,6 +152,15 @@ Unnamed `MOODLE_URL` / `MOODLE_TOKEN` still work as the default instance, but on
 
 ## Client setup
 
+**Claude Code plugin.** The repository is also a plugin marketplace. The `moodle-obsidian` plugin starts the server with `uvx`, asks for your vault folder and note language, and adds a weekly-review skill:
+
+```text
+/plugin install moodle-obsidian --marketplace CarlosAndreFerreira/moodle-obsidian-mcp
+```
+
+You still log in once with `moodle-mcp --login` (see [Browser login](#browser-login-sso)).
+
+
 If the client doesn't inherit your shell's `PATH`, use the absolute path of `moodle-mcp` as the command (`~/.local/bin/moodle-mcp` with `uv tool` or `pipx` on Linux and macOS; see `uv tool dir --bin`).
 
 **Claude Code / Claude Desktop** (`mcpServers`):

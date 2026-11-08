@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "moodle": {
+      "command": "uvx",
+      "args": ["moodle-obsidian-mcp[pdf]==0.8.1"],
+      "env": {
+        "OBSIDIAN_VAULT_DIR": "${user_config.vault_dir}",
+        "MOODLE_MCP_LANGUAGE": "${user_config.language}",
+        "MOODLE_URL": "${user_config.moodle_url}",
+        "MOODLE_TOKEN": "${user_config.moodle_token}"
+      }
+    }
+  }
+}

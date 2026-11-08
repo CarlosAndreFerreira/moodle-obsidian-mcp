@@ -277,6 +277,15 @@ ferramentas de escrita continuam desligadas por omissão.
 
 ### Configuração nos clientes
 
+**Plugin do Claude Code.** O repositório também é um *marketplace* de plugins. O plugin `moodle-obsidian` arranca o servidor com `uvx`, pede a pasta do Vault e a língua das notas, e acrescenta uma *skill* de revisão semanal:
+
+```text
+/plugin install moodle-obsidian --marketplace CarlosAndreFerreira/moodle-obsidian-mcp
+```
+
+O login no Moodle continua a ser feito uma vez com `moodle-mcp --login`.
+
+
 **Claude Code / Claude Desktop** (`mcpServers`):
 
 ```json
