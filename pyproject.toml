@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "moodle-obsidian-mcp"
-version = "0.8.0"
+version = "0.8.1"
 description = "MCP server for Moodle with server-side prompt-injection defenses, SSO login and Obsidian vault sync"
 readme = "README.md"
 # tomllib é stdlib a partir do 3.11 e é o que lê o config.toml sem dependências.
@@ -46,6 +46,8 @@ dev = ["pytest>=8.0", "responses>=0.25", "ruff>=0.6", "mypy>=1.11", "hypothesis>
 
 [project.scripts]
 moodle-mcp = "moodle_mcp.server:main"
+# Com o nome do pacote, para `uvx moodle-obsidian-mcp` (é o que os clientes do MCP Registry correm).
+moodle-obsidian-mcp = "moodle_mcp.server:main"
 moodle-mcp-token-catcher = "moodle_mcp.token_catcher:cli"
 
 [project.urls]
@@ -69,6 +71,7 @@ include = [
   "README.md",
   "CHANGELOG.md",
   "SECURITY.md",
+  "server.json",
   "LICENSE",
   ".env.example",
   "main.py",
