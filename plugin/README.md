@@ -25,7 +25,7 @@ In Claude Code you can also install it straight from the repository:
 
 ## What it runs, sends and writes
 
-- **Runs** `uvx moodle-obsidian-mcp[pdf]==<version>`, which downloads the package from PyPI the first time and runs it locally over stdio.
+- **Runs** `uvx moodle-obsidian-mcp==<version>`, which downloads the package from PyPI the first time and runs it locally over stdio. The plugin runs it without the optional `[pdf]` extra (PyMuPDF, AGPL): downloaded PDFs are saved, but not converted to searchable Markdown notes. For that, install the command-line tool with `[pdf]` (step 2) and use it as your MCP server instead.
 - **Sends** requests only to the Moodle address you configured, with your token. There is no telemetry and no other server.
 - **Writes** only inside the vault folder you chose (notes, the `.ics` calendar, downloaded course materials, and a `.moodle-mcp/` state folder).
 - **Read-only by default.** Tools that act on Moodle (submitting, posting, messaging) are off unless you enable the `write` toolset, and even then each action asks for your confirmation.

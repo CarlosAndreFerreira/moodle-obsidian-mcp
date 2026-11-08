@@ -4,17 +4,27 @@ Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-PT/1.1.0/);
 o projeto segue [versionamento semântico](https://semver.org/lang/pt/) (antes da
 1.0, uma versão menor pode mudar comportamento).
 
-## [Por publicar]
+## [0.8.2] — 2026-11-08
 
 ### Adicionado
 - **Plugin do Claude Code** (`plugin/`) e `marketplace.json` na raiz:
   `/plugin install moodle-obsidian --marketplace
   CarlosAndreFerreira/moodle-obsidian-mcp`. Arranca o servidor com
-  `uvx moodle-obsidian-mcp[pdf]==<versão>` (versão exata, como o diretório da
-  Anthropic exige), pede o Vault e a língua, aceita um token opcional guardado
-  como segredo e traz a *skill* `moodle-weekly-review`. Preparado para a
+  `uvx` numa versão exata, como o diretório da Anthropic exige, pede o Vault
+  e a língua, aceita um token opcional guardado como segredo e traz a *skill* `moodle-weekly-review`. Preparado para a
   submissão ao diretório do Claude; os testes obrigam a versão do plugin a
   acompanhar a do pacote.
+- Ícone do plugin (`plugin/.claude-plugin/icon.png`), desenho original.
+
+### Corrigido
+- O plugin passa a validação do diretório do Claude: arranca o servidor com
+  `uvx moodle-obsidian-mcp==<versão>` (o `[pdf]` era lido como um padrão de
+  glob e bloqueava), a opção da língua deixa de ter `options`, e as opções
+  chegam ao servidor como `CLAUDE_PLUGIN_OPTION_<CHAVE>`, os únicos nomes que o
+  diretório aceita. O servidor traduz esses nomes para `OBSIDIAN_VAULT_DIR`,
+  `MOODLE_MCP_LANGUAGE`, `MOODLE_URL` e `MOODLE_TOKEN`, sem se sobrepor a uma
+  variável já definida. Sem o extra `[pdf]`, o plugin guarda os PDFs mas não os
+  converte em notas.
 
 ## [0.8.1] — 2026-11-08
 
@@ -222,6 +232,7 @@ o projeto segue [versionamento semântico](https://semver.org/lang/pt/) (antes d
 - `set_moodle_token` valida antes de gravar e não muda o URL de uma instância.
 - As ferramentas que gravam credenciais (`auth`) ficam desligadas por omissão.
 
+[0.8.2]: https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp/compare/v0.7.2...v0.8.0
 [0.7.2]: https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp/compare/v0.7.1...v0.7.2

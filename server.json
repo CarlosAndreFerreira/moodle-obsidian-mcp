@@ -3,7 +3,7 @@
   "name": "io.github.CarlosAndreFerreira/moodle-obsidian-mcp",
   "title": "Moodle + Obsidian",
   "description": "Moodle for AI assistants, SSO included: courses, grades, deadlines and forums synced to Obsidian.",
-  "version": "0.8.1",
+  "version": "0.8.2",
   "websiteUrl": "https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp",
   "repository": {
     "url": "https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp",
@@ -13,7 +13,7 @@
     {
       "registryType": "pypi",
       "identifier": "moodle-obsidian-mcp",
-      "version": "0.8.1",
+      "version": "0.8.2",
       "runtimeHint": "uvx",
       "transport": {
         "type": "stdio"
