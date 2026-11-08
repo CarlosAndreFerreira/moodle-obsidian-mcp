@@ -12,7 +12,14 @@
   "documentationUrl": "https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp#readme",
   "supportUrl": "https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp/issues",
   "license": "MIT",
-  "keywords": ["moodle", "obsidian", "education", "students", "lms"],
+  "keywords": [
+    "moodle",
+    "obsidian",
+    "education",
+    "students",
+    "lms"
+  ],
+  "icon": "./.claude-plugin/icon.png",
   "userConfig": {
     "vault_dir": {
       "type": "directory",
@@ -24,7 +31,10 @@
       "type": "string",
       "title": "Note language",
       "description": "Language of the generated notes.",
-      "options": ["en", "pt"],
+      "options": [
+        "en",
+        "pt"
+      ],
       "default": "en"
     },
     "moodle_url": {
