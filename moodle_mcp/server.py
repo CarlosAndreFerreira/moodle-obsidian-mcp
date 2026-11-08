@@ -391,7 +391,7 @@ def set_moodle_token(
         str,
         Field(
             description=(
-                "URL base (https://) de uma instância que ainda não tenha URL configurado; "
+                "URL base (https://) da primeira instância, numa instalação sem nenhuma configurada; "
                 "vazio usa o atual. Não muda o URL de uma instância existente."
             )
         ),
@@ -435,6 +435,22 @@ def set_moodle_token(
                     f"Recusado: a instância '{name}' já tem URL ({current_url}). Mudar o URL de uma "
                     "instância existente só é possível na configuração (config.toml ou "
                     f"MOODLE_{name.upper()}_URL), não por uma ferramenta."
+                ),
+            }
+        others = [inst for inst_name, inst in config.instances().items() if inst.url and inst_name != name]
+        if not current_url and others:
+            # Criar instâncias novas fica para a configuração quando já há alguma:
+            # senão, uma injeção com `auth` e `write` ligados podia registar um
+            # servidor seu e enviar-lhe ficheiros do Vault com upload_file_to_draft.
+            return {
+                "error": True,
+                "saved": False,
+                "instance": name,
+                "message": (
+                    f"Recusado: já há instâncias configuradas ({', '.join(i.name for i in others)}). "
+                    f"Para acrescentar '{name}', usa `moodle-mcp --set instances.{name}.url=<url>` "
+                    f"ou MOODLE_{name.upper()}_URL; "
+                    "uma ferramenta só configura o URL na primeira instalação."
                 ),
             }
         base_url = new_url
@@ -613,12 +629,13 @@ def extract_token_from_session_cookie(
     # 1. Try /user/managetoken.php
     resp = session.get(f"{base_url}/user/managetoken.php", timeout=20)
     if resp.ok and "login" not in resp.url.lower():
-        soup = BeautifulSoup(resp.text, "html.parser")
-        # Find 32-char hex tokens in table cells
-        candidates = re.findall(r"\b[a-f0-9]{32}\b", soup.get_text(" "))
-        if candidates:
-            token = candidates[0]
-            return set_moodle_token(token, instance=instance)
+        # Cada token tem o seu serviço; o primeiro hexadecimal da página podia
+        # ser de outro serviço (sem as funções da app) ou nem ser um token.
+        # Experimenta primeiro o da app móvel, e só grava o que o Moodle aceitar.
+        for token in _managetoken_candidates(resp.text)[:5]:
+            result = set_moodle_token(token, instance=instance)
+            if result.get("saved"):
+                return result
 
     # 2. Fluxo da app móvel, com um passport de uso único (verificado no decode)
     pending = login.start_login(instance)
@@ -636,6 +653,29 @@ def extract_token_from_session_cookie(
             "Verifica se a sessão ainda está ativa."
         ),
     }
+
+
+def _managetoken_candidates(page_html: str) -> list[str]:
+    """Tokens da página `/user/managetoken.php`, com os da app móvel primeiro.
+
+    Args:
+        page_html: O HTML da página.
+
+    Returns:
+        Os tokens distintos, ordenados: primeiro os das linhas que mencionam o
+        serviço da app móvel, depois os restantes, pela ordem da página.
+    """
+    soup = BeautifulSoup(page_html, "html.parser")
+    rows = soup.find_all("tr") or [soup]
+    mobile: list[str] = []
+    other: list[str] = []
+    for row in rows:
+        text = row.get_text(" ")
+        bucket = mobile if re.search(r"mobile", text, re.IGNORECASE) else other
+        for token in re.findall(r"\b[a-f0-9]{32}\b", text):
+            if token not in mobile and token not in other:
+                bucket.append(token)
+    return mobile + other
 
 
 @mcp.tool(annotations=_ann("Chamar função arbitrária da API", destructive=True, idempotent=False))
@@ -1830,8 +1870,10 @@ def _sync_course(
             fdue_str = datetime.fromtimestamp(fdue).strftime("%Y-%m-%d %H:%M")
             n_disc, n_mine = _count_my_forum_posts(int(f["id"]), userid, instance=instance)
             fstatus = f"{n_mine} post(s) meus" if n_mine else "sem participação"
+            forum_url = f"{base_url}/mod/forum/view.php?id={f.get('cmid')}"
             uc_lines.append(
-                f"| `{fdue_str}` | [{vault.table_cell(f.get('name'))}]({base_url}/mod/forum/view.php?id={f.get('cmid')}) "
+                f"| `{fdue_str}` | "
+                f"{vault.md_link(vault.table_cell(f.get('name')), forum_url)} "
                 f"| {n_disc} | {n_mine} | `{f.get('cmid')}` |"
             )
             upcoming_items.append(
@@ -1863,7 +1905,7 @@ def _sync_course(
             uc_lines.extend(
                 [
                     "",
-                    f"> ⚠️ **Escolha por responder:** [{ch.get('name')}]({ch_url}) "
+                    f"> ⚠️ **Escolha por responder:** {vault.md_link(ch.get('name'), ch_url)} "
                     f"({len(options)} opções disponíveis)",
                 ]
             )
@@ -1906,7 +1948,9 @@ def _sync_course(
                 comp = mod.get("completiondata", {}).get("state", 0)
                 check = "✅" if comp == 1 else "⬜"
                 if murl:
-                    uc_lines.append(f"- {check} [{mname}]({murl}) (`{mtype}`, id: `{mid}`, cmid: `{cmid}`)")
+                    uc_lines.append(
+                        f"- {check} {vault.md_link(mname, murl)} (`{mtype}`, id: `{mid}`, cmid: `{cmid}`)"
+                    )
                 else:
                     uc_lines.append(f"- {check} {mname} (`{mtype}`, id: `{mid}`, cmid: `{cmid}`)")
             uc_lines.append("")
@@ -2103,7 +2147,7 @@ def sync_dashboard(
             ]
         )
         for cname, ch_name, ch_url in pending_choices:
-            dashboard_lines.append(f"- {cname} — [{ch_name}]({ch_url})")
+            dashboard_lines.append(f"- {cname} — {vault.md_link(ch_name, ch_url)}")
     dashboard_lines.append("")
     dashboard_lines.append("_⚠️ = prazo já ultrapassado e atividade ainda em falta._")
 
@@ -2216,6 +2260,34 @@ def _iter_registered_tools() -> list[Any]:
     except AttributeError:  # pragma: no cover - depende da versão do SDK
         logger.warning("Não foi possível inspecionar as ferramentas registadas.")
         return []
+
+
+def offload_blocking_tools() -> int:
+    """Faz as ferramentas síncronas correr numa thread, em vez de no event loop.
+
+    O FastMCP chama ferramentas `def` diretamente no event loop. Cada uma faz
+    pedidos HTTP com timeout de 30 s e até quatro tentativas, pelo que um
+    Moodle lento deixava o servidor sem responder a pings, cancelamentos e
+    outros pedidos durante minutos. As funções Python não mudam (a
+    sincronização e os testes continuam a chamá-las de forma síncrona); só a
+    chamada que vem do cliente MCP passa por `anyio.to_thread`.
+
+    Returns:
+        O número de ferramentas alteradas (0 numa segunda chamada).
+    """
+    changed = 0
+    for tool in _iter_registered_tools():
+        if getattr(tool, "is_async", True):
+            continue
+        blocking = tool.fn
+
+        async def in_thread(_fn: Any = blocking, **kwargs: Any) -> Any:
+            return await anyio.to_thread.run_sync(functools.partial(_fn, **kwargs))
+
+        tool.fn = in_thread
+        tool.is_async = True
+        changed += 1
+    return changed
 
 
 def strip_schema_titles() -> int:
@@ -2372,6 +2444,16 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument("--no-browser", action="store_true", help="Com --login: só mostra o link.")
+    parser.add_argument(
+        "--set",
+        action="append",
+        default=[],
+        metavar="CHAVE=VALOR",
+        help=(
+            "Grava uma opção no config.toml e termina (pode repetir-se). "
+            f"Chaves: {', '.join(config.SETTINGS)}, ou instances.<nome>.url para uma instância (https)."
+        ),
+    )
     parser.add_argument("--version", action="version", version=f"moodle-mcp {__version__}")
     args = parser.parse_args(argv)
 
@@ -2408,6 +2490,28 @@ def main(argv: list[str] | None = None) -> int:
             webbrowser.open(pending["url"])
         return 0
 
+    if args.set:
+        for item in args.set:
+            key, sep, value = item.partition("=")
+            key, value = key.strip(), value.strip()
+            instance_key = re.fullmatch(r"instances\.([a-z0-9][a-z0-9_]*)\.url", key, re.IGNORECASE)
+            if sep and instance_key:
+                try:
+                    url = _validate_instance_url(value)
+                except ValueError as exc:
+                    parser.error(str(exc))
+                path = config.save_instance_url(instance_key.group(1), url)
+                print(f"instância '{instance_key.group(1).lower()}' = {url} gravada em {path}")
+                continue
+            if not sep or key not in config.SETTINGS:
+                parser.error(
+                    f"--set espera CHAVE=VALOR com CHAVE em: {', '.join(config.SETTINGS)}, "
+                    "ou instances.<nome>.url"
+                )
+            path = config.save_setting(key, value)
+            print(f"{key} = {value!r} gravado em {path}")
+        return 0
+
     if args.show_config:
         for key, value in config.describe().items():
             print(f"{key:<20} {value}")
@@ -2432,6 +2536,7 @@ def main(argv: list[str] | None = None) -> int:
 
     removed = apply_toolsets(enabled)
     titles = strip_schema_titles()
+    offloaded = offload_blocking_tools()
     for risky, nota in (
         ("write", "podem submeter trabalhos, publicar em fóruns e enviar mensagens"),
         ("raw", "dão acesso total à API de Web Services, escrita incluída"),
@@ -2449,11 +2554,13 @@ def main(argv: list[str] | None = None) -> int:
         else:
             logger.info("Ações no Moodle pedem confirmação ao utilizador (modo '%s').", mode)
     logger.info(
-        "Toolsets ativos: %s | %d ferramentas expostas (%d retiradas, %d titles removidos)",
+        "Toolsets ativos: %s | %d ferramentas expostas (%d retiradas, %d titles removidos, "
+        "%d a correr numa thread)",
         ",".join(sorted(enabled)),
         len(_iter_registered_tools()),
         len(removed),
         titles,
+        offloaded,
     )
 
     mcp.run(transport="stdio")
