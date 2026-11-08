@@ -116,6 +116,12 @@ def md_link(text: Any, url: str) -> str:
     return f"[{label}]({target})"
 
 
+def write_file(path: Path, text: str) -> None:
+    """Escreve um ficheiro que não é Markdown (p.ex. o `.ics`), de forma atómica."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    config.atomic_write(path, text, 0o644)
+
+
 def write_note(path: Path, markdown: str) -> None:
     """Escreve uma nota no Vault com o conteúdo ativo do Obsidian desativado.
 

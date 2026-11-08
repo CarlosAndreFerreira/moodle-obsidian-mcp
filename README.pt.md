@@ -15,7 +15,7 @@ Servidor **Model Context Protocol (MCP)** em Python (`FastMCP`) desenhado para e
    * Cria uma nota individual por cada Unidade Curricular (`Unidades Curriculares/<Nome da UC>.md`) com grelha de avaliação (`gradereport`), estado de submissão de cada *e-fólio* (`mod_assign`), enunciados convertidos para Markdown e árvore de recursos.
 3. **Download de Materiais + Extração de PDFs para Markdown (`PyMuPDF`):**
    * `download_all_course_materials_to_obsidian`: Descarrega automaticamente todos os PDFs, slides, enunciados anexos e páginas HTML de uma cadeira para `Unidades Curriculares/<UC>/Materiais/` e converte cada PDF num ficheiro `.pdf.md` pesquisável no Obsidian e legível por agentes de IA.
-4. **32 Ferramentas MCP para Estudantes (Leitura + Escrita):**
+4. **33 Ferramentas MCP para Estudantes (Leitura + Escrita):**
    * **Cursos, Livros e Progresso:** `get_enrolled_courses`, `get_course_contents`, `get_course_pages_and_books` (`mod_book`, `mod_page`, `mod_folder`, `mod_resource`), `get_activities_completion_status`, `toggle_activity_completion`, `get_course_participants`.
    * **Notas, Trabalhos e Submissões:** `get_course_grades`, `get_all_grades_overview`, `get_assignments`, `get_assignment_submission`, `get_course_quizzes`, `upload_file_to_draft`, `save_assignment_submission`, `add_submission_comment`.
    * **Fóruns Assíncronos e Mensagens:** `get_course_forums`, `get_forum_discussions`, `get_discussion_posts`, `search_all_course_forums`, `export_forum_discussions_to_obsidian`, `reply_to_forum_post`, `create_forum_discussion`, `send_instant_message`, `get_messages`, `get_calendar_events`.
@@ -135,16 +135,16 @@ servidor de outra.
 
 ### Toolsets
 
-As 32 ferramentas custam ~8 900 tokens de contexto em cada pedido. Expor só o
+As 33 ferramentas custam ~9 700 tokens de contexto em cada pedido. Expor só o
 que usas corta isso para menos de metade:
 
 | `--tools` | Tools | ~tokens | Escrita no Moodle |
 |:---|--:|--:|:---|
-| **(omissão)** | **21** | **~4 950** | **não** |
-| `core,grades,forums,obsidian,write` | 28 | ~7 250 | sim |
-| `all` | 32 | ~8 900 | sim, mais a API livre |
-| `core,obsidian` | 12 | ~3 200 | não |
-| `core` | 8 | ~1 600 | não |
+| **(omissão)** | **22** | **~5 500** | **não** |
+| `core,grades,forums,obsidian,write` | 29 | ~7 900 | sim |
+| `all` | 33 | ~9 700 | sim, mais a API livre |
+| `core,obsidian` | 13 | ~3 700 | não |
+| `core` | 8 | ~1 750 | não |
 
 `core` é sempre incluído.
 
@@ -167,11 +167,18 @@ lê do Moodle e escreve apenas no Vault local; para as activar é preciso
 `--tools ...,write`, e o servidor registra um aviso no arranque quando estão
 ligadas. O mesmo vale para `raw`, que expõe a API de Web Services por inteiro.
 
-Das 21 ferramentas da omissão, 17 estão marcadas como `readOnlyHint`, pelo que
+Das 22 ferramentas da omissão, 18 estão marcadas como `readOnlyHint`, pelo que
 um cliente as pode auto-aprovar sem auto-aprovar nada irreversível.
 
 ### Fiabilidade
 
+* **O que mudou:** cada sincronização compara-se com a anterior e escreve uma nota
+  «O que mudou no Moodle» (a ferramenta `get_recent_changes` devolve o mesmo, sem
+  pedir nada ao Moodle): notas lançadas, prazos alterados, trabalhos e testes
+  novos, materiais novos, tópicos de fórum novos ou com respostas novas.
+* **Prazos em todo o lado:** um calendário `.ics` ao lado do painel (importável ou
+  subscritível no Google Calendar, Outlook, Thunderbird ou telemóvel, com alarme na
+  véspera) e uma lista no formato do Obsidian Tasks (`- [ ] … 📅 AAAA-MM-DD`).
 * **As tuas notas são tuas.** O conteúdo gerado fica entre `%% moodle-mcp:start %%`
   e `%% moodle-mcp:end %%`; o que escreves fora desse bloco, e as propriedades que
   acrescentas ao frontmatter, sobrevivem a todas as sincronizações. Uma nota de

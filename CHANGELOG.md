@@ -7,6 +7,16 @@ o projeto segue [versionamento semântico](https://semver.org/lang/pt/) (antes d
 ## [Por publicar]
 
 ### Adicionado
+- **O que mudou:** cada sincronização guarda um retrato de cada UC (notas,
+  trabalhos e estado da submissão, módulos, tópicos dos fóruns, testes) e
+  compara-o com o anterior. O resultado vai para a nota «O que mudou no Moodle»
+  e para a ferramenta nova `get_recent_changes` (só de leitura, não faz pedidos
+  ao Moodle; no toolset `obsidian`). A sincronização devolve `changes_count`.
+- **Calendário `.ics`** com os prazos (trabalhos, fóruns avaliados, testes) ao
+  lado do painel, com alarme na véspera (RFC 5545: escapes, dobragem a 75
+  octetos, CRLF).
+- **Tarefas do Obsidian Tasks** no painel (`- [ ] … 📅 AAAA-MM-DD`), marcadas
+  como feitas quando o trabalho está entregue.
 - **Notas com bloco gerido:** o conteúdo gerado fica entre os marcadores
   `%% moodle-mcp:start %%` e `%% moodle-mcp:end %%` (comentários do Obsidian,
   invisíveis na leitura). O que o estudante escreve fora do bloco, e as
