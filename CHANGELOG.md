@@ -4,6 +4,39 @@ Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-PT/1.1.0/);
 o projeto segue [versionamento semântico](https://semver.org/lang/pt/) (antes da
 1.0, uma versão menor pode mudar comportamento).
 
+## [0.8.3] — 2026-11-16
+
+### Segurança
+- **Escrita em pastas de configuração do Vault.** O `download_moodle_file`
+  só verificava que o destino ficava dentro do Vault, e aceitava
+  `.obsidian/plugins/…`, `.obsidian/community-plugins.json`,
+  `.claude/settings.json`, `.git/hooks/…` e `.moodle-mcp/`. Um anexo de fórum
+  (um `pluginfile.php` válido, que qualquer participante pode carregar) e
+  instruções escondidas num post podiam levar o modelo a instalar um plugin do
+  Obsidian ou um hook do Claude Code, ou seja, a executar código na máquina do
+  estudante. É a classe de falha do CVE-2025-53773 (Copilot) e do
+  CVE-2025-54135 (Cursor). Reportado em privado; obrigado.
+  - Todo o destino escolhido pelo modelo (`dest_path`, `vault_dir`) ou composto
+    a partir de nomes do Moodle passa por `vault.resolve_visible`, que recusa
+    qualquer componente escondido. O `upload_file_to_draft` também recusa
+    enviar ficheiros escondidos para o Moodle.
+  - `safe_filename` retira pontos iniciais: uma secção ou UC chamada
+    `.obsidian` já não cria uma pasta escondida.
+  - Um download só substitui um ficheiro que o mesmo URL descarregou para o
+    mesmo sítio; senão, o novo fica com ` (2)` no nome (`saved_as` no
+    resultado). Antes, uma nota do estudante era substituída sem aviso, e um
+    anexo de fórum podia tomar o lugar do PDF de um professor, que a
+    sincronização incremental depois já não voltava a descarregar.
+  - Só as extensões de material de estudo se mantêm; as outras (`.js`, `.json`,
+    `.css`, `.sh`, e também `.md`, `.canvas` e `.base`, que em bruto não passam
+    pela neutralização de `dataviewjs`/Templater) ficam com `.txt` acrescentado,
+    com o conteúdo intacto.
+- **Estado do Vault escrito fora do Vault (desde a 0.8.0).** O nome da
+  instância, que o modelo escolhe e que com uma só instância é texto livre,
+  entrava sem validação no nome do ficheiro de estado:
+  `t/../../../.claude/settings` gravava em `~/.claude/settings.json`. O nome
+  passa a ser validado (`[a-z0-9][a-z0-9_-]*`) antes de qualquer escrita.
+
 ## [0.8.2] — 2026-11-08
 
 ### Adicionado
@@ -232,6 +265,7 @@ o projeto segue [versionamento semântico](https://semver.org/lang/pt/) (antes d
 - `set_moodle_token` valida antes de gravar e não muda o URL de uma instância.
 - As ferramentas que gravam credenciais (`auth`) ficam desligadas por omissão.
 
+[0.8.3]: https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp/compare/v0.8.2...v0.8.3
 [0.8.2]: https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp/compare/v0.7.2...v0.8.0
