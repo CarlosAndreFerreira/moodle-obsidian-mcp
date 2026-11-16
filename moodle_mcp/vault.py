@@ -62,6 +62,77 @@ def resolve_in_vault(candidate: Any) -> Path:
     return target
 
 
+def hidden_part(path: Path) -> str | None:
+    """Devolve o primeiro componente escondido (começado por `.`) de um caminho do Vault, ou None.
+
+    O caminho tem de estar dentro do Vault (`resolve_in_vault`); conta só o que
+    está abaixo da raiz.
+    """
+    for part in path.relative_to(vault_root()).parts:
+        if part.startswith("."):
+            return part
+    return None
+
+
+def resolve_visible(candidate: Any) -> Path:
+    """Como `resolve_in_vault`, mas recusa também pastas e ficheiros escondidos do Vault.
+
+    Ficar dentro do Vault protege `~/.ssh` e afins, mas o Vault tem as suas
+    próprias pastas de configuração que carregam código: `.obsidian/plugins/`
+    (plugins da comunidade, com acesso total à máquina), `.claude/settings.json`
+    (hooks do Claude Code quando o Vault é aberto como projeto), `.git/hooks/`,
+    `.vscode/`, e o estado deste servidor em `.moodle-mcp/`. Um post de fórum
+    com instruções escondidas podia levar o modelo a descarregar um anexo para
+    lá (a mesma classe de falha do CVE-2025-53773 e do CVE-2025-54135). Todo o
+    destino escolhido pelo modelo, ou composto a partir de nomes do Moodle,
+    passa por aqui; só o próprio servidor escreve em `.moodle-mcp/`.
+
+    Raises:
+        ValueError: Se o caminho sair do Vault ou passar por um componente escondido.
+
+    """
+    target = resolve_in_vault(candidate)
+    part = hidden_part(target)
+    if part is not None:
+        raise ValueError(
+            f"Acesso recusado: '{part}' é uma pasta ou ficheiro escondido do Vault "
+            "(configuração do Obsidian, do Claude Code, do git ou deste servidor). "
+            "Escolhe um destino visível, p.ex. 'Unidades Curriculares/<UC>/Materiais/'."
+        )
+    return target
+
+
+#: Extensões que um ficheiro descarregado do Moodle mantém: materiais de estudo.
+#:
+#: Tudo o resto fica com `.txt` acrescentado (`neutral_download_name`), com o
+#: conteúdo intacto mas sem ser interpretado: `.js` (scripts do Templater e de
+#: outros plugins), `.json`/`.css` (configuração e snippets), `.sh`/`.bat`/`.exe`,
+#: e também `.md`, `.canvas` e `.base`, porque uma nota descarregada em bruto
+#: não passa pela neutralização de blocos `dataviewjs`/Templater que as notas
+#: geradas pelo servidor passam.
+DOWNLOAD_EXTENSIONS = frozenset(
+    {
+        # Documentos
+        "pdf", "doc", "docx", "odt", "rtf", "txt", "epub", "djvu", "tex", "bib", "ris",
+        "ppt", "pptx", "pps", "ppsx", "odp", "key",
+        "xls", "xlsx", "ods", "csv", "tsv",
+        # Imagens, áudio e vídeo
+        "png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff", "heic",
+        "mp3", "m4a", "wav", "ogg", "oga", "opus", "flac", "aac",
+        "mp4", "m4v", "webm", "mov", "mkv", "avi",
+        # Arquivos e dados de cadeiras de métodos
+        "zip", "7z", "rar", "tar", "gz", "tgz", "bz2", "xz",
+        "sav", "dta", "rdata", "rds", "r", "rmd", "py", "ipynb", "m", "sql", "ggb",
+    }
+)  # fmt: skip
+
+
+def neutral_download_name(name: str) -> str:
+    """Acrescenta `.txt` a um nome cuja extensão não é de material de estudo (idempotente)."""
+    suffix = Path(name).suffix.lower().lstrip(".")
+    return name if suffix in DOWNLOAD_EXTENSIONS else f"{name}.txt"
+
+
 def html_to_markdown(html_text: str) -> str:
     """Transforma HTML do Moodle em Markdown, depois de retirar o conteúdo escondido."""
     if not html_text:
@@ -255,6 +326,7 @@ def safe_filename(name: str) -> str:
 
     * Retira separadores, caracteres proibidos no Windows e de controlo.
     * Recusa `.`/`..`/vazio, que mudariam de diretório ou não teriam nome.
+    * Retira pontos iniciais, que tornariam o ficheiro ou a pasta escondidos.
     * Retira pontos e espaços finais (o Windows descarta-os em silêncio).
     * Prefixa nomes reservados do Windows (`CON`, `NUL`, `COM1`…), com ou sem extensão.
     * Trunca o nome, não a extensão: `aula.pdf` com 200 caracteres continua a
@@ -262,7 +334,8 @@ def safe_filename(name: str) -> str:
     """
     # `#^[]` são válidos em ficheiros mas partem as ligações [[...]] do Obsidian.
     cleaned = re.sub(r'[\\/*?:"<>|#^\[\]\x00-\x1f\x7f]+', "-", str(name))
-    cleaned = re.sub(r"\s+", " ", cleaned).strip().rstrip(". ")
+    # Sem pontos iniciais: um nome do Moodle como `.obsidian` criaria uma pasta escondida.
+    cleaned = re.sub(r"\s+", " ", cleaned).strip().rstrip(". ").lstrip(". ")
     if not cleaned.strip("."):
         return "_"
     stem, dot, suffix = cleaned.rpartition(".")

@@ -16,6 +16,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -23,10 +24,27 @@ from typing import Any
 
 from moodle_mcp import config
 
+#: Nomes de instância aceites no nome do ficheiro de estado (os de `--set instances.<nome>.url`).
+_INSTANCE_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
+
 
 def state_file(root: Path, instance: str) -> Path:
-    """Caminho do ficheiro de estado de uma instância."""
-    return root / ".moodle-mcp" / f"state-{instance}.json"
+    """Caminho do ficheiro de estado de uma instância.
+
+    O nome vem do parâmetro `instance` das ferramentas, que o modelo escolhe e
+    que, com uma só instância configurada, é texto livre (um nome desconhecido
+    é encaminhado para a única instância). Sem esta validação,
+    `t/../../../.claude/settings` gravava o estado em `~/.claude/settings.json`,
+    fora do Vault.
+
+    Raises:
+        ValueError: Se o nome não for um nome de instância válido.
+
+    """
+    name = (instance or "").strip().lower()
+    if not _INSTANCE_RE.fullmatch(name):
+        raise ValueError(f"Nome de instância inválido: {instance!r} (letras, dígitos, '_' e '-').")
+    return root / ".moodle-mcp" / f"state-{name}.json"
 
 
 def load(root: Path, instance: str) -> dict[str, Any]:

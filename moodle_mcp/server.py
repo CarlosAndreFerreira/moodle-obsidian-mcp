@@ -8,7 +8,8 @@ Decisões de segurança que atravessam o módulo:
 
 * `_redact_secrets` corre em `_moodle_call`, o único ponto de passagem HTTP, para
   que nenhuma credencial devolvida pelo Moodle chegue ao modelo.
-* `vault.resolve_in_vault` confina toda a leitura e escrita de ficheiros ao Vault.
+* `vault.resolve_in_vault` confina toda a leitura e escrita de ficheiros ao Vault, e
+  `vault.resolve_visible` recusa as pastas escondidas (`.obsidian`, `.claude`, `.git`...).
 * Nenhum parâmetro usa `Optional[...]`, por compatibilidade de schema com os
   vários providers de LLM.
 
@@ -886,7 +887,13 @@ def download_moodle_file(
     dest_path: Annotated[
         str,
         Field(
-            description="Destino do ficheiro. Relativo resolve a partir da raiz do\nVault; tem de ficar dentro do Vault."
+            description=(
+                "Destino do ficheiro, relativo à raiz do Vault (p.ex. 'Unidades Curriculares/<UC>/"
+                "Materiais/aula.pdf'). Tem de ficar dentro do Vault e fora de pastas escondidas "
+                "(.obsidian, .claude, .git...). Um ficheiro que já exista e não tenha sido descarregado "
+                "por este servidor não é substituído: o novo fica com ' (2)' no nome. Extensões que "
+                "não são de material de estudo (.js, .json, .md...) ficam com '.txt' acrescentado."
+            )
         ),
     ],
     extract_pdf_to_markdown: Annotated[
@@ -917,7 +924,42 @@ def download_moodle_file(
             ficheiro da instância configurada (o token nunca sai para outro anfitrião).
         MoodleRequestError: Se o download falhar.
     """
-    target = vault.resolve_in_vault(dest_path)
+    requested = vault.resolve_visible(dest_path)
+    target = requested.with_name(vault.neutral_download_name(requested.name))
+    root = vault.vault_root()
+    state.state_file(root, instance)  # recusa um nome de instância que sairia do Vault, antes de descarregar
+    files = state.load(root, instance).get("files", {})  # só leitura: sem lock nem pastas novas
+    known = files.get(state.file_key(file_url))
+    same_file = isinstance(known, dict) and known.get("path") == target.relative_to(root).as_posix()
+    if target.exists() and not same_file:
+        # Só se substitui o que este mesmo URL descarregou para este mesmo sítio: nem uma
+        # nota do estudante, nem o PDF de um professor trocado por um anexo de fórum.
+        target = _free_path(target)
+    result = _save_moodle_file(file_url, target, extract_pdf_to_markdown, instance)
+    with state.locked(root, instance):
+        latest = state.load(root, instance)
+        state.remember(latest.setdefault("files", {}), file_url, {}, target, root)
+        state.save(root, instance, latest)
+    if target != requested:
+        result["saved_as"] = str(target)
+        result["requested_path"] = str(requested)
+    return result
+
+
+def _free_path(path: Path) -> Path:
+    """O primeiro `nome (2).ext`, `nome (3).ext`… que ainda não existe."""
+    counter = 2
+    candidate = path
+    while candidate.exists():
+        candidate = path.with_name(f"{path.stem} ({counter}){path.suffix}")
+        counter += 1
+    return candidate
+
+
+def _save_moodle_file(
+    file_url: str, target: Path, extract_pdf_to_markdown: bool, instance: str
+) -> dict[str, Any]:
+    """Descarrega para `target` (já validado pelo chamador) e extrai o texto de um PDF."""
     _download_to(target, file_url, instance)
 
     result: dict[str, Any] = {
@@ -1027,8 +1069,9 @@ def download_course_materials(
         return {"error": True, "details": contents}
 
     cname = _course_folder_name(course_id, instance)
+    state.state_file(vault.vault_root(), instance)  # nome de instância inválido: falha antes de escrever
 
-    base_uc_dir = vault.resolve_in_vault(_sync_root(vault_dir) / _courses_dir() / cname / "Materiais")
+    base_uc_dir = vault.resolve_visible(_sync_root(vault_dir) / _courses_dir() / cname / "Materiais")
     base_uc_dir.mkdir(parents=True, exist_ok=True)
 
     downloaded: list[str] = []
@@ -1055,7 +1098,7 @@ def download_course_materials(
                         stem = mname if Path(fname).stem.lower() == "index" else Path(fname).stem
                         dest = vault.unique_path(sec_dir / f"{vault.safe_filename(stem)}.md", used)
                     else:
-                        dest = vault.unique_path(sec_dir / fname, used)
+                        dest = vault.unique_path(sec_dir / vault.neutral_download_name(fname), used)
                     if state.is_unchanged(files, furl, content_item, dest):
                         skipped.append(str(dest))
                         continue
@@ -1066,9 +1109,7 @@ def download_course_materials(
                             vault.write_note(dest, f"# {mname}\n\n{vault.html_to_markdown(r.text)}\n")
                             downloaded.append(str(dest))
                         else:
-                            res = download_moodle_file(
-                                furl, str(dest), extract_pdf_to_markdown=extract_pdfs, instance=instance
-                            )
+                            res = _save_moodle_file(furl, dest, extract_pdfs, instance)
                             downloaded.append(res["downloaded_file"])
                         state.remember(files, furl, content_item, dest, root)
                     except Exception as e:
@@ -1087,15 +1128,15 @@ def download_course_materials(
                         fname = vault.safe_filename(att.get("filename", "enunciado.pdf"))
                         if furl:
                             dest = vault.unique_path(
-                                efolios_dir / vault.safe_filename(f"{aname}_{fname}"), used
+                                efolios_dir
+                                / vault.neutral_download_name(vault.safe_filename(f"{aname}_{fname}")),
+                                used,
                             )
                             if state.is_unchanged(files, furl, att, dest):
                                 skipped.append(str(dest))
                                 continue
                             try:
-                                res = download_moodle_file(
-                                    furl, str(dest), extract_pdf_to_markdown=extract_pdfs, instance=instance
-                                )
+                                res = _save_moodle_file(furl, dest, extract_pdfs, instance)
                                 downloaded.append(res["downloaded_file"])
                                 state.remember(files, furl, att, dest, root)
                             except Exception as e:
@@ -1212,7 +1253,7 @@ async def upload_file_to_draft(
         ValueError: Se `file_path` cair fora do Vault.
     """
     base_url, token = _resolve_target(instance)
-    path = vault.resolve_in_vault(file_path)
+    path = vault.resolve_visible(file_path)  # nunca enviar configuração (.claude, .obsidian...) para o Moodle
     if not path.exists():
         return {"error": True, "message": f"Ficheiro não encontrado: {path}"}
 
@@ -1593,7 +1634,7 @@ def export_course_forums(
 
     cname = _course_folder_name(course_id, instance)
 
-    foruns_dir = vault.resolve_in_vault(_sync_root(vault_dir) / _courses_dir() / cname / "Foruns")
+    foruns_dir = vault.resolve_visible(_sync_root(vault_dir) / _courses_dir() / cname / "Foruns")
     foruns_dir.mkdir(parents=True, exist_ok=True)
 
     exported_files = []
@@ -1669,7 +1710,7 @@ def _sync_root(vault_dir: str = "") -> Path:
     Por ordem: o `vault_dir` da chamada, a opção `sync_subdir`
     (`MOODLE_MCP_SYNC_SUBDIR`) e a raiz do Vault. Sempre confinada ao Vault.
     """
-    return vault.resolve_in_vault(vault_dir or config.get("sync_subdir") or ".")
+    return vault.resolve_visible(vault_dir or config.get("sync_subdir") or ".")
 
 
 #: Nome do painel antes de haver a opção `language`; mantido se já existir no Vault.
@@ -2111,6 +2152,7 @@ def sync_dashboard(
         O resumo da sincronização.
     """
     base_url, _ = _resolve_target(instance)
+    state.state_file(vault.vault_root(), instance)  # nome de instância inválido: falha antes de escrever
     target_dir = _sync_root(vault_dir)
     target_dir.mkdir(parents=True, exist_ok=True)
     uc_dir = target_dir / _courses_dir()
@@ -2437,7 +2479,7 @@ def _dashboard_markdown(instance: str) -> str:
     relative = data.get("dashboard")
     if not isinstance(relative, str) or not relative:
         return "Ainda não houve sincronização: corre `sync_doctoral_dashboard_to_obsidian`."
-    path = vault.resolve_in_vault(relative)  # o estado vive no Vault; não confiar no caminho
+    path = vault.resolve_visible(relative)  # o estado vive no Vault; não confiar no caminho
     if not path.is_file():
         return f"O painel `{relative}` já não existe no Vault."
     with path.open("rb") as handle:
