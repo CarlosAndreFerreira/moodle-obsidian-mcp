@@ -199,13 +199,17 @@ def test_changed_or_missing_files_are_downloaded_again(vault, monkeypatch):
 
 
 @responses.activate
-def test_unreadable_state_means_download_everything(vault, monkeypatch):
+def test_unreadable_state_recognises_its_files_instead_of_duplicating(vault, monkeypatch):
     _fake_course(monkeypatch, 100)
     responses.get(FILE, body=b"%PDF")
     responses.get(PAGE, body="<p>guia</p>")
     server.download_course_materials(5, extract_pdfs=False, instance="test")
     state.state_file(vault, "test").write_text("{corrompido", encoding="utf-8")
-    assert server.download_course_materials(5, extract_pdfs=False, instance="test")["downloaded_count"] == 2
+    again = server.download_course_materials(5, extract_pdfs=False, instance="test")
+    # O PDF tem o tamanho que o Moodle indica: é reconhecido. A página é reescrita no mesmo sítio.
+    assert again["downloaded_count"] == 1 and again["unchanged_count"] == 1
+    names = sorted(p.name for p in vault.rglob("*") if p.is_file() and ".moodle-mcp" not in p.parts)
+    assert not any(" (2)" in name for name in names), names
 
 
 def test_switching_language_replaces_the_block_once(vault, monkeypatch):

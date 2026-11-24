@@ -4,6 +4,28 @@ Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-PT/1.1.0/);
 o projeto segue [versionamento semântico](https://semver.org/lang/pt/) (antes da
 1.0, uma versão menor pode mudar comportamento).
 
+## [0.8.6] — 2026-11-24
+
+### Corrigido
+- **A 0.8.5 duplicava os materiais descarregados por versões antigas.** Os
+  materiais gravados antes de haver estado (antes da 0.8.0) não têm registo, e
+  a regra de nunca substituir o que não é deste URL tratava cada um como do
+  estudante: o download seguinte gravava `aula (2).pdf` ao lado de cada ficheiro.
+  Num Vault real com 159 materiais antigos, 87 ficariam com uma segunda cópia.
+  Um material sem registo passa a ser reconhecido quando:
+  - é um ficheiro com exatamente o tamanho que o Moodle indica (fica igual e
+    não é descarregado outra vez); procura-se também entre as cópias numeradas
+    da mesma pasta (`image.png`, `image (2).png`…), porque as versões antigas
+    numeravam os nomes repetidos por outra ordem;
+  - é uma nota de página que começa pelo título que o servidor escreve, ou que
+    já tem o bloco gerido (é reescrita no mesmo sítio, com backup).
+
+  Na dúvida (sem tamanho do Moodle, tamanho diferente, outra nota com o mesmo
+  nome), não reconhece, e a cópia vai para o lado. No mesmo Vault, todos os
+  materiais que existiam passaram a ser reconhecidos, e não houve nenhuma cópia.
+- Um material já guardado numa pasta é reaproveitado mesmo quando a numeração
+  dos nomes repetidos muda entre sincronizações, em vez de ganhar outra cópia.
+
 ## [0.8.5] — 2026-11-24
 
 ### Corrigido
@@ -346,6 +368,9 @@ o projeto segue [versionamento semântico](https://semver.org/lang/pt/) (antes d
 - `set_moodle_token` valida antes de gravar e não muda o URL de uma instância.
 - As ferramentas que gravam credenciais (`auth`) ficam desligadas por omissão.
 
+[0.8.6]: https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp/compare/v0.8.5...v0.8.6
+[0.8.5]: https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp/compare/v0.8.4...v0.8.5
+[0.8.4]: https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp/compare/v0.8.3...v0.8.4
 [0.8.3]: https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp/compare/v0.8.2...v0.8.3
 [0.8.2]: https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp/compare/v0.8.0...v0.8.1
