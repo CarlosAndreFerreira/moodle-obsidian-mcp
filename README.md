@@ -5,6 +5,7 @@
 [![CI](https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT-green)](https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp/blob/main/LICENSE)
 ![MCP](https://img.shields.io/badge/MCP-server-purple)
+[![M8ven Score](https://m8ven.ai/badge/mcp/carlosandreferreira-moodle-obsidian-mcp-u39wro?v=1b01d78ec604b582e107399b14b1a6ee)](https://m8ven.ai/mcp/carlosandreferreira-moodle-obsidian-mcp-u39wro?s=readme)
 
 A **Model Context Protocol** server that gives AI assistants (Claude, opencode, any MCP client) safe access to **Moodle**, and syncs your courses, grades, deadlines and materials into an **Obsidian** vault.
 
