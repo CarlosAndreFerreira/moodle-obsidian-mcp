@@ -152,13 +152,31 @@ def is_unchanged(files: dict[str, Any], fileurl: str, item: dict[str, Any], targ
 
 
 def remember(files: dict[str, Any], fileurl: str, item: dict[str, Any], target: Path, root: Path) -> None:
-    """Regista a versão descarregada de um ficheiro."""
+    """Regista a versão descarregada de um ficheiro.
+
+    `path` é o último sítio onde foi gravado; `paths` são todos os que ainda
+    existem. O mesmo ficheiro pode estar em dois módulos de uma UC, e cada cópia
+    tem de continuar a ser reconhecida como deste URL, e não do estudante.
+    """
     try:
         where = target.relative_to(root).as_posix()
     except ValueError:
         where = str(target)
+    previous = files.get(file_key(fileurl))
+    earlier = known_paths(previous) if isinstance(previous, dict) else []
+    paths = [p for p in earlier if p != where and (root / p).exists()] + [where]
     files[file_key(fileurl)] = {
         "timemodified": item.get("timemodified"),
         "filesize": item.get("filesize"),
         "path": where,
+        "paths": paths,
     }
+
+
+def known_paths(entry: dict[str, Any]) -> list[str]:
+    """Os caminhos (relativos ao Vault) onde um URL foi gravado, do mais antigo ao último."""
+    paths = [p for p in entry.get("paths", []) if isinstance(p, str)]
+    last = entry.get("path")
+    if isinstance(last, str) and last not in paths:
+        paths.append(last)
+    return paths

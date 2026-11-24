@@ -945,7 +945,7 @@ def get_course_participants(
     annotations=ToolAnnotations(
         title="Descarregar ficheiro para o Vault",
         readOnlyHint=False,
-        destructiveHint=False,
+        destructiveHint=True,
         idempotentHint=True,
         openWorldHint=True,
     )
@@ -1005,12 +1005,7 @@ def download_moodle_file(
     root = vault.vault_root()
     state.state_file(root, instance)  # recusa um nome de instância que sairia do Vault, antes de descarregar
     files = state.load(root, instance).get("files", {})  # só leitura: sem lock nem pastas novas
-    known = files.get(state.file_key(file_url))
-    same_file = isinstance(known, dict) and known.get("path") == target.relative_to(root).as_posix()
-    if target.exists() and not same_file:
-        # Só se substitui o que este mesmo URL descarregou para este mesmo sítio: nem uma
-        # nota do estudante, nem o PDF de um professor trocado por um anexo de fórum.
-        target = _free_path(target)
+    target = _not_someone_elses(target, file_url, files, root)
     result = _save_moodle_file(file_url, target, extract_pdf_to_markdown, instance)
     with state.locked(root, instance):
         latest = state.load(root, instance)
@@ -1020,6 +1015,48 @@ def download_moodle_file(
         result["saved_as"] = str(target)
         result["requested_path"] = str(requested)
     return result
+
+
+def _known_paths(files: dict[str, Any], file_url: str, root: Path) -> list[Path]:
+    """Onde o estado diz que este URL foi gravado (caminhos absolutos, já resolvidos)."""
+    entry = files.get(state.file_key(file_url))
+    if not isinstance(entry, dict):
+        return []
+    return [(root / path).resolve() for path in state.known_paths(entry)]
+
+
+def _not_someone_elses(target: Path, file_url: str, files: dict[str, Any], root: Path) -> Path:
+    """O destino, ou um nome livre ao lado se `target` for de outra origem.
+
+    Só se substitui o que este mesmo URL descarregou para este mesmo sítio: nem um
+    ficheiro ou nota do estudante, nem o PDF de um professor trocado por um anexo de
+    fórum. Sem registo no estado (p.ex. estado perdido) não há como saber de quem é
+    o ficheiro, e fica-se pelo lado seguro: o novo vai para `nome (2).ext`.
+    """
+    if not target.exists() or target.resolve() in _known_paths(files, file_url, root):
+        return target
+    return _free_path(target)
+
+
+def _course_target(dest: Path, file_url: str, files: dict[str, Any], root: Path, used: set[Path]) -> Path:
+    """Destino de um material da UC numa sincronização, sem nunca cair em cima de algo alheio.
+
+    Se `dest` for de outra origem e uma sincronização anterior já tiver gravado este
+    URL ao lado (`aula (2).pdf`, porque `aula.pdf` é do estudante), continua a usar
+    esse nome; sem isto, cada sincronização criava mais uma cópia. Só se reaproveita
+    um caminho na mesma pasta e ainda não usado nesta sincronização.
+    """
+    known = _known_paths(files, file_url, root)
+    if dest.exists() and dest.resolve() not in known:
+        taken = {path.resolve() for path in used}
+        folder = dest.parent.resolve()
+        for previous in reversed(known):
+            if previous.parent == folder and previous not in taken and previous.exists():
+                used.add(previous)
+                return previous
+    chosen = _not_someone_elses(dest, file_url, files, root)
+    used.add(chosen)
+    return chosen
 
 
 def _free_path(path: Path) -> Path:
@@ -1069,7 +1106,9 @@ def _save_moodle_file(
             n_pages = len(doc)
             doc.close()
             md_path = target.with_suffix(".pdf.md")
-            vault.write_note(md_path, "\n".join(md_pages))
+            # Nota com bloco gerido: o que o estudante escrever fora do bloco fica, e
+            # uma nota antiga sem marcadores vai primeiro para `.moodle-mcp/backup/`.
+            vault.write_managed_note(md_path, "\n".join(md_pages))
             result["extracted_markdown"] = str(md_path)
             result["pdf_pages"] = n_pages
         except Exception as e:
@@ -1121,7 +1160,7 @@ def _download_to(target: Path, file_url: str, instance: str) -> None:
     annotations=ToolAnnotations(
         title="Descarregar materiais da UC",
         readOnlyHint=False,
-        destructiveHint=False,
+        destructiveHint=True,
         idempotentHint=True,
         openWorldHint=True,
     )
@@ -1139,6 +1178,9 @@ async def download_all_course_materials_to_obsidian(
     de uma disciplina diretamente para a pasta da Unidade Curricular dentro do teu Vault do Obsidian
     (`<Vault>/Unidades Curriculares/<Nome da UC>/Materiais/`),
     convertendo também os PDFs e Páginas HTML em notas Markdown pesquisáveis!
+    Um material alterado no Moodle substitui a versão que este servidor descarregou antes;
+    um ficheiro do estudante com o mesmo nome nunca é substituído (o novo fica com ' (2)'),
+    e nas notas geradas só muda o bloco gerido.
     """
     result = await _in_thread(download_course_materials, course_id, extract_pdfs, instance, vault_dir)
     return DownloadResult.model_validate(_raise_on_error(result))
@@ -1183,6 +1225,7 @@ def download_course_materials(
                         dest = vault.unique_path(sec_dir / f"{vault.safe_filename(stem)}.md", used)
                     else:
                         dest = vault.unique_path(sec_dir / vault.neutral_download_name(fname), used)
+                    dest = _course_target(dest, furl, files, root, used)
                     if state.is_unchanged(files, furl, content_item, dest):
                         skipped.append(str(dest))
                         continue
@@ -1190,7 +1233,7 @@ def download_course_materials(
                         if is_page:
                             r = transport.authed_get(furl, instance, timeout=30)
                             sec_dir.mkdir(parents=True, exist_ok=True)
-                            vault.write_note(dest, f"# {mname}\n\n{vault.html_to_markdown(r.text)}\n")
+                            vault.write_managed_note(dest, f"# {mname}\n\n{vault.html_to_markdown(r.text)}\n")
                             downloaded.append(str(dest))
                         else:
                             res = _save_moodle_file(furl, dest, extract_pdfs, instance)
@@ -1216,6 +1259,7 @@ def download_course_materials(
                                 / vault.neutral_download_name(vault.safe_filename(f"{aname}_{fname}")),
                                 used,
                             )
+                            dest = _course_target(dest, furl, files, root, used)
                             if state.is_unchanged(files, furl, att, dest):
                                 skipped.append(str(dest))
                                 continue
@@ -2336,7 +2380,7 @@ def _sync_course(
     annotations=ToolAnnotations(
         title="Sincronizar painel no Obsidian",
         readOnlyHint=False,
-        destructiveHint=False,
+        destructiveHint=True,
         idempotentHint=True,
         openWorldHint=True,
     )

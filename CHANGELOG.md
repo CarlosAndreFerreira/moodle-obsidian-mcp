@@ -4,6 +4,41 @@ Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-PT/1.1.0/);
 o projeto segue [versionamento semântico](https://semver.org/lang/pt/) (antes da
 1.0, uma versão menor pode mudar comportamento).
 
+## [0.8.5] — 2026-11-24
+
+### Corrigido
+- **Notas do estudante apagadas ao descarregar outra vez.** O texto extraído
+  de um PDF (`<ficheiro>.pdf.md`) e as notas das páginas HTML eram reescritos
+  por inteiro sempre que o material mudava no Moodle: o que o estudante lá
+  escrevesse perdia-se. Passam a ser notas com bloco gerido, como as das UCs
+  e dos fóruns: só o bloco muda, o resto da nota fica, e uma nota antiga sem
+  marcadores vai primeiro para `.moodle-mcp/backup/`.
+- **`download_all_course_materials_to_obsidian` substituía ficheiros do
+  estudante com o mesmo nome.** A regra do `download_moodle_file` (só se
+  substitui o que o mesmo URL lá pôs; senão o novo fica com ` (2)`) passa a
+  valer também nos materiais da UC e na sincronização. Nas sincronizações
+  seguintes, a cópia ao lado é atualizada no mesmo sítio, sem criar uma nova.
+  O estado guarda agora todos os sítios onde cada URL foi gravado (`paths`),
+  para que o mesmo ficheiro em dois módulos continue a ser reconhecido. Sem
+  estado (p.ex. apagado), fica-se pelo lado seguro e grava-se ao lado.
+
+### Alterado
+- **`destructiveHint=True` em `download_moodle_file`,
+  `download_all_course_materials_to_obsidian` e
+  `sync_doctoral_dashboard_to_obsidian`.** Substituem a versão anterior de um
+  material pela nova, e a anterior pode já não existir no Moodle; pela
+  especificação MCP, `destructiveHint=false` quer dizer que a ferramenta só
+  faz atualizações aditivas. O `export_forum_discussions_to_obsidian` fica com
+  `false`: só regenera o bloco gerido das notas. Os clientes MCP podem passar
+  a pedir confirmação antes destas três ferramentas.
+
+### Testes
+- `tests/test_download_safety.py`: ficheiros e notas do estudante com o mesmo
+  nome, atualização da cópia ao lado sem duplicar, o mesmo ficheiro em dois
+  módulos, texto do estudante em notas de páginas e de PDFs, backup de uma
+  nota sem marcadores, e o novo registo de caminhos no estado.
+- `tests/test_annotations.py`: o conjunto exato de ferramentas destrutivas.
+
 ## [0.8.4] — 2026-11-24
 
 ### Corrigido
