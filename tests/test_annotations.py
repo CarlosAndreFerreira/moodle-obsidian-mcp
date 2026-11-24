@@ -98,6 +98,27 @@ def test_irreversible_actions_are_not_idempotent():
         assert by_name[name].idempotentHint is False, name
 
 
+#: Podem fazer perder algo que não se volta a obter: submeter em definitivo, trocar
+#: as credenciais guardadas, chamar qualquer função da API, ou substituir um
+#: ficheiro do Vault pela nova versão do Moodle (a anterior pode já lá não estar).
+DESTRUCTIVE = {
+    "set_moodle_token",
+    "decode_mobile_launch_token",
+    "extract_token_from_session_cookie",
+    "call_any_moodle_wsfunction",
+    "save_assignment_submission",
+    "download_moodle_file",
+    "download_all_course_materials_to_obsidian",
+    "sync_doctoral_dashboard_to_obsidian",
+}
+
+
+def test_exactly_the_tools_that_can_lose_content_are_destructive():
+    # Uma ferramenta nova tem de ser classificada aqui de propósito, nos dois sentidos.
+    flagged = {tool.name for tool in _listed_tools() if tool.annotations.destructiveHint}
+    assert flagged == DESTRUCTIVE
+
+
 def test_open_world_matches_whether_the_tool_talks_to_moodle():
     for tool in _listed_tools():
         assert tool.annotations.openWorldHint is (tool.name not in LOCAL_ONLY), tool.name
