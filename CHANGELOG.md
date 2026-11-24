@@ -4,6 +4,52 @@ Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-PT/1.1.0/);
 o projeto segue [versionamento semântico](https://semver.org/lang/pt/) (antes da
 1.0, uma versão menor pode mudar comportamento).
 
+## [0.8.4] — 2026-11-24
+
+### Corrigido
+- **Lock do estado ignorado no Windows sob contenção.** Criar o ficheiro de
+  lock no instante em que o dono o está a apagar dá `PermissionError` no
+  Windows (o nome só desaparece quando o último handle fecha), e o
+  `state.locked` tratava isso como erro definitivo e seguia sem lock: uma
+  sincronização agendada e outra pedida no cliente podiam perder um registo do
+  estado uma da outra. Num teste com 4 threads a criar e apagar o mesmo
+  ficheiro, cerca de 5% das tentativas davam `PermissionError`. Passa a contar
+  como contenção (espera e tenta de novo, até `LOCK_WAIT_SECONDS`); em POSIX
+  continua a desistir logo. Libertar o lock também insiste enquanto o Windows
+  der o ficheiro como em uso, em vez de o deixar preso até ficar abandonado.
+  Apareceu como falha intermitente de `test_lock_serialises_read_modify_write`
+  no CI (`windows-latest`).
+- **`get_recent_changes` declarava `openWorldHint=True`.** A ferramenta não faz
+  pedidos ao Moodle: lê o resultado guardado no Vault pela última
+  sincronização. Passa a declarar `openWorldHint=False`. Era a única hint que
+  não correspondia ao comportamento.
+- **Descrição do `get_messages`.** Dizia devolver "notificações e mensagens",
+  mas pede só `type=notifications`. A descrição diz agora o que devolve e que
+  não marca nada como lido.
+
+### Alterado
+- **As quatro hints de cada ferramenta ficam escritas por extenso.** Cada
+  `@mcp.tool` passa a ter um `ToolAnnotations(...)` com `readOnlyHint`,
+  `destructiveHint`, `idempotentHint` e `openWorldHint` explícitos, em vez de
+  uma função auxiliar com valores por omissão. O que os clientes recebiam em
+  `tools/list` não muda (já vinham as quatro em todas as ferramentas), mas um
+  scanner estático ou quem revê o código lia só os argumentos escritos e dava
+  5 ferramentas como "sem anotações" e as 32 como incompletas.
+
+### Testes
+- `tests/test_annotations.py`: todas as ferramentas listadas têm título e as
+  quatro hints em booleano; as hints estão escritas literalmente no código;
+  os toolsets de leitura só têm ferramentas `readOnlyHint=True`; nenhuma
+  ferramenta que escreve se declara só de leitura; as ações que criam
+  duplicados não se declaram idempotentes; `openWorldHint` é `False` só para
+  o que lê apenas o Vault.
+- `tests/test_read_tools.py`: a função do Moodle e os parâmetros enviados por
+  `get_course_pages_and_books`, `get_activities_completion_status`,
+  `get_all_grades_overview`, `get_forum_discussions`,
+  `search_all_course_forums` (incluindo um fórum que falha),
+  `get_calendar_events` e `get_messages` (que não envia `markasread`). Todas
+  as 33 ferramentas ficam referenciadas nos testes.
+
 ## [0.8.3] — 2026-11-16
 
 ### Segurança

@@ -179,37 +179,17 @@ UserId = Annotated[
 ]
 
 
-def _ann(
-    title: str,
-    *,
-    read_only: bool = False,
-    destructive: bool = False,
-    idempotent: bool = True,
-) -> ToolAnnotations:
-    """Constrói as anotações de uma ferramenta para os clientes MCP.
-
-    Os clientes usam estes sinais para decidir o que podem auto-aprovar e o que
-    exige confirmação humana. São interpretados pelo cliente, não pelo provider
-    de LLM, pelo que funcionam igualmente em qualquer modelo.
-
-    Args:
-        title: Nome legível para a interface do cliente.
-        read_only: True se a ferramenta não altera nada (nem no Moodle nem em disco).
-        destructive: True se pode sobrescrever ou tornar irreversível algo existente.
-        idempotent: False se repetir a chamada cria duplicados.
-
-    Returns:
-        O objeto `ToolAnnotations` a passar a `@mcp.tool(annotations=...)`.
-        `openWorldHint` é sempre True: todas as ferramentas falam com um servidor
-        Moodle remoto.
-    """
-    return ToolAnnotations(
-        title=title,
-        readOnlyHint=read_only,
-        destructiveHint=destructive,
-        idempotentHint=idempotent,
-        openWorldHint=True,
-    )
+# Anotações das ferramentas (`ToolAnnotations`). Os clientes usam-nas para decidir
+# o que podem auto-aprovar e o que exige confirmação humana; são interpretadas pelo
+# cliente, não pelo provider de LLM. Cada ferramenta declara as quatro hints por
+# extenso, sem valores por omissão, para que quem lê o código (ou um scanner
+# estático) veja o mesmo que o cliente recebe em `tools/list`:
+#   readOnlyHint     True se não altera nada, nem no Moodle nem em disco.
+#   destructiveHint  True se pode sobrescrever ou tornar irreversível algo existente.
+#   idempotentHint   False se repetir a chamada cria duplicados.
+#   openWorldHint    True se fala com o servidor Moodle remoto; False só para as
+#                    ferramentas que leem apenas o estado local do Vault.
+# tests/test_annotations.py garante que nenhuma ferramenta fica sem uma delas.
 
 
 def _resolve_target(instance: str = "") -> tuple[str, str]:
@@ -395,7 +375,15 @@ def _get_current_user_id(instance: str = DEFAULT_INSTANCE) -> int:
 # ==============================================================================
 
 
-@mcp.tool(annotations=_ann("Guardar token do Moodle", destructive=True))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Guardar token do Moodle",
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=True,
+        openWorldHint=True,
+    )
+)
 def set_moodle_token(
     token: Annotated[
         str, Field(description="O `wstoken` do Web Service do Moodle (32 caracteres hexadecimais).")
@@ -544,7 +532,15 @@ def _validate_instance_url(url: str) -> str:
     return clean
 
 
-@mcp.tool(annotations=_ann("Capturar token via moodlemobile://", destructive=True))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Capturar token via moodlemobile://",
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=True,
+        openWorldHint=True,
+    )
+)
 def decode_mobile_launch_token(
     launch_url_or_base64: Annotated[
         str, Field(description="O URL `moodlemobile://token=...` completo, ou apenas a parte em Base64.")
@@ -602,7 +598,15 @@ def decode_mobile_launch_token(
     }
 
 
-@mcp.tool(annotations=_ann("Extrair token de um cookie", destructive=True))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Extrair token de um cookie",
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=True,
+        openWorldHint=True,
+    )
+)
 def extract_token_from_session_cookie(
     moodle_session_cookie: Annotated[
         str, Field(description="Valor do cookie `MoodleSession` de uma sessão de browser ativa.")
@@ -683,7 +687,15 @@ def _managetoken_candidates(page_html: str) -> list[str]:
     return mobile + other
 
 
-@mcp.tool(annotations=_ann("Chamar função arbitrária da API", destructive=True, idempotent=False))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Chamar função arbitrária da API",
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=False,
+        openWorldHint=True,
+    )
+)
 async def call_any_moodle_wsfunction(
     wsfunction: Annotated[
         str, Field(description="Nome da função de Web Service, ex.: `core_user_get_users_by_field`.")
@@ -718,7 +730,15 @@ async def call_any_moodle_wsfunction(
 # ==============================================================================
 
 
-@mcp.tool(annotations=_ann("Ver informação do site", read_only=True))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Ver informação do site",
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    )
+)
 def get_site_info(
     instance: Inst = DEFAULT_INSTANCE,
 ):
@@ -726,7 +746,15 @@ def get_site_info(
     return _moodle_call("core_webservice_get_site_info", instance=instance)
 
 
-@mcp.tool(annotations=_ann("Listar disciplinas inscritas", read_only=True))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Listar disciplinas inscritas",
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    )
+)
 def get_enrolled_courses(
     classification: Annotated[
         str, Field(description="Filtro temporal: 'all', 'inprogress', 'future', 'past' ou 'favourites'.")
@@ -751,7 +779,15 @@ def get_enrolled_courses(
         return _moodle_call("core_enrol_get_users_courses", {"userid": userid}, instance=instance)
 
 
-@mcp.tool(annotations=_ann("Ver conteúdos da disciplina", read_only=True))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Ver conteúdos da disciplina",
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    )
+)
 def get_course_contents(
     course_id: CourseId,
     instance: Inst = DEFAULT_INSTANCE,
@@ -760,7 +796,15 @@ def get_course_contents(
     return _moodle_call("core_course_get_contents", {"courseid": course_id}, instance=instance)
 
 
-@mcp.tool(annotations=_ann("Ver páginas e livros", read_only=True))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Ver páginas e livros",
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    )
+)
 def get_course_pages_and_books(
     course_id: CourseId,
     instance: Inst = DEFAULT_INSTANCE,
@@ -785,7 +829,15 @@ def get_course_pages_and_books(
     }
 
 
-@mcp.tool(annotations=_ann("Ver progresso de atividades", read_only=True))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Ver progresso de atividades",
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    )
+)
 def get_activities_completion_status(
     course_id: CourseId,
     instance: Inst = DEFAULT_INSTANCE,
@@ -799,7 +851,15 @@ def get_activities_completion_status(
     )
 
 
-@mcp.tool(annotations=_ann("Marcar atividade como concluída"))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Marcar atividade como concluída",
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    )
+)
 async def toggle_activity_completion(
     cmid: Annotated[
         int,
@@ -829,7 +889,15 @@ async def toggle_activity_completion(
     )
 
 
-@mcp.tool(annotations=_ann("Listar participantes", read_only=True))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Listar participantes",
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    )
+)
 def get_course_participants(
     course_id: CourseId,
     limit: Annotated[int, Field(description="Número máximo de participantes a devolver.")] = 100,
@@ -873,7 +941,15 @@ def get_course_participants(
 # ==============================================================================
 
 
-@mcp.tool(annotations=_ann("Descarregar ficheiro para o Vault"))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Descarregar ficheiro para o Vault",
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    )
+)
 def download_moodle_file(
     file_url: Annotated[
         str,
@@ -1041,7 +1117,15 @@ def _download_to(target: Path, file_url: str, instance: str) -> None:
         tmp.unlink(missing_ok=True)
 
 
-@mcp.tool(annotations=_ann("Descarregar materiais da UC"))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Descarregar materiais da UC",
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    )
+)
 async def download_all_course_materials_to_obsidian(
     course_id: CourseId,
     extract_pdfs: Annotated[
@@ -1162,7 +1246,15 @@ def download_course_materials(
 # ==============================================================================
 
 
-@mcp.tool(annotations=_ann("Listar trabalhos e e-fólios", read_only=True))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Listar trabalhos e e-fólios",
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    )
+)
 def get_assignments(
     instance: Inst = DEFAULT_INSTANCE,
 ):
@@ -1170,7 +1262,15 @@ def get_assignments(
     return _moodle_call("mod_assign_get_assignments", instance=instance)
 
 
-@mcp.tool(annotations=_ann("Ver estado de uma submissão", read_only=True))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Ver estado de uma submissão",
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    )
+)
 def get_assignment_submission(
     assign_id: Annotated[
         int, Field(description="ID do trabalho — o campo `id` de get_assignments, NÃO o cmid.")
@@ -1187,7 +1287,15 @@ def get_assignment_submission(
     )
 
 
-@mcp.tool(annotations=_ann("Ver notas da disciplina", read_only=True))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Ver notas da disciplina",
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    )
+)
 def get_course_grades(
     course_id: CourseId,
     user_id: UserId = 0,
@@ -1202,7 +1310,15 @@ def get_course_grades(
     )
 
 
-@mcp.tool(annotations=_ann("Ver resumo de todas as notas", read_only=True))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Ver resumo de todas as notas",
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    )
+)
 def get_all_grades_overview(
     instance: Inst = DEFAULT_INSTANCE,
 ):
@@ -1210,7 +1326,15 @@ def get_all_grades_overview(
     return _moodle_call("gradereport_overview_get_course_grades", instance=instance)
 
 
-@mcp.tool(annotations=_ann("Listar testes", read_only=True))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Listar testes",
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    )
+)
 def get_course_quizzes(
     course_id: CourseId,
     instance: Inst = DEFAULT_INSTANCE,
@@ -1220,7 +1344,15 @@ def get_course_quizzes(
     return quizzes
 
 
-@mcp.tool(annotations=_ann("Enviar ficheiro para rascunho", idempotent=False))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Enviar ficheiro para rascunho",
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=True,
+    )
+)
 async def upload_file_to_draft(
     file_path: Annotated[
         str,
@@ -1283,7 +1415,15 @@ async def upload_file_to_draft(
     return sanitize.clean_payload(_redact_secrets(transport.json_body(response)))
 
 
-@mcp.tool(annotations=_ann("Submeter trabalho / e-fólio", destructive=True, idempotent=False))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Submeter trabalho / e-fólio",
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=False,
+        openWorldHint=True,
+    )
+)
 async def save_assignment_submission(
     assign_id: Annotated[int, Field(description="ID do trabalho (campo `id` de get_assignments).")],
     online_text_html: Annotated[
@@ -1340,7 +1480,15 @@ async def save_assignment_submission(
     return result
 
 
-@mcp.tool(annotations=_ann("Comentar numa submissão", idempotent=False))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Comentar numa submissão",
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=True,
+    )
+)
 async def add_submission_comment(
     context_id: Annotated[int, Field(description="ID de contexto do módulo do trabalho no Moodle.")],
     item_id: Annotated[int, Field(description="ID do item a comentar (normalmente o id da submissão).")],
@@ -1380,7 +1528,15 @@ async def add_submission_comment(
 # ==============================================================================
 
 
-@mcp.tool(annotations=_ann("Listar fóruns", read_only=True))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Listar fóruns",
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    )
+)
 def get_course_forums(
     course_id: CourseId,
     instance: Inst = DEFAULT_INSTANCE,
@@ -1389,7 +1545,15 @@ def get_course_forums(
     return _moodle_call("mod_forum_get_forums_by_courses", {"courseids[0]": course_id}, instance=instance)
 
 
-@mcp.tool(annotations=_ann("Listar tópicos de um fórum", read_only=True))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Listar tópicos de um fórum",
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    )
+)
 def get_forum_discussions(
     forum_id: Annotated[int, Field(description="ID do fórum (campo `id` de get_course_forums).")],
     instance: Inst = DEFAULT_INSTANCE,
@@ -1398,7 +1562,15 @@ def get_forum_discussions(
     return _moodle_call("mod_forum_get_forum_discussions", {"forumid": forum_id}, instance=instance)
 
 
-@mcp.tool(annotations=_ann("Ler posts de um tópico", read_only=True))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Ler posts de um tópico",
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    )
+)
 def get_discussion_posts(
     discussion_id: Annotated[
         int, Field(description="ID do tópico (campo `discussion` de get_forum_discussions).")
@@ -1409,7 +1581,15 @@ def get_discussion_posts(
     return _moodle_call("mod_forum_get_discussion_posts", {"discussionid": discussion_id}, instance=instance)
 
 
-@mcp.tool(annotations=_ann("Procurar nos fóruns", read_only=True))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Procurar nos fóruns",
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    )
+)
 def search_all_course_forums(
     course_id: CourseId,
     query: Annotated[
@@ -1456,7 +1636,15 @@ def search_all_course_forums(
     return {"query": query, "course_id": course_id, "matches_count": len(matches), "matches": matches}
 
 
-@mcp.tool(annotations=_ann("Responder num fórum", idempotent=False))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Responder num fórum",
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=True,
+    )
+)
 async def reply_to_forum_post(
     post_id: Annotated[
         int, Field(description="ID do post a que se responde (campo `id` de get_discussion_posts).")
@@ -1495,7 +1683,15 @@ async def reply_to_forum_post(
     return _moodle_call("mod_forum_add_discussion_post", params, instance=instance)
 
 
-@mcp.tool(annotations=_ann("Criar tópico num fórum", idempotent=False))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Criar tópico num fórum",
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=True,
+    )
+)
 async def create_forum_discussion(
     forum_id: Annotated[
         int, Field(description="ID do fórum onde criar o tópico (campo `id` de get_course_forums).")
@@ -1534,7 +1730,15 @@ async def create_forum_discussion(
     return _moodle_call("mod_forum_add_discussion", params, instance=instance)
 
 
-@mcp.tool(annotations=_ann("Enviar mensagem instantânea", idempotent=False))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Enviar mensagem instantânea",
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=True,
+    )
+)
 async def send_instant_message(
     to_user_id: Annotated[
         int, Field(description="ID do destinatário (campo `id` de get_course_participants).")
@@ -1560,7 +1764,15 @@ async def send_instant_message(
     )
 
 
-@mcp.tool(annotations=_ann("Ver eventos e prazos", read_only=True))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Ver eventos e prazos",
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    )
+)
 def get_calendar_events(
     course_id: Annotated[
         int,
@@ -1584,14 +1796,25 @@ def get_calendar_events(
     return _moodle_call("core_calendar_get_calendar_upcoming_view", instance=instance)
 
 
-@mcp.tool(annotations=_ann("Ler mensagens", read_only=True))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Ler mensagens",
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    )
+)
 def get_messages(
     read: Annotated[
-        bool, Field(description="True devolve as mensagens já lidas; False devolve as não lidas.")
+        bool, Field(description="True devolve as notificações já lidas; False devolve as não lidas.")
     ] = False,
     instance: Inst = DEFAULT_INSTANCE,
 ):
-    """Obtém notificações e mensagens recebidas pelo aluno."""
+    """Obtém as notificações recebidas pelo aluno (avisos do Moodle, não conversas privadas).
+
+    Não as marca como lidas: o Moodle só o faz com `markasread`, que não é enviado.
+    """
     uid = _get_current_user_id(instance=instance)
     return _moodle_call(
         "core_message_get_messages",
@@ -1609,7 +1832,15 @@ def get_messages(
 # ==============================================================================
 
 
-@mcp.tool(annotations=_ann("Exportar fóruns para o Vault"))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Exportar fóruns para o Vault",
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    )
+)
 async def export_forum_discussions_to_obsidian(
     course_id: CourseId,
     instance: Inst = DEFAULT_INSTANCE,
@@ -2101,7 +2332,15 @@ def _sync_course(
     return dashboard_lines, upcoming_items, pending_choices, created_files
 
 
-@mcp.tool(annotations=_ann("Sincronizar painel no Obsidian"))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Sincronizar painel no Obsidian",
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    )
+)
 async def sync_doctoral_dashboard_to_obsidian(
     vault_dir: VaultDir = "",
     download_materials: Annotated[
@@ -2395,7 +2634,15 @@ def _task_lines(items: list[tuple[int, str, str, str, str, Any, str]], now_ts: i
     return lines
 
 
-@mcp.tool(annotations=_ann("Ver o que mudou no Moodle", read_only=True))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Ver o que mudou no Moodle",
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=False,
+    )
+)
 def get_recent_changes(
     instance: Inst = DEFAULT_INSTANCE,
 ) -> RecentChanges:

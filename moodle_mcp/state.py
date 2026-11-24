@@ -66,6 +66,7 @@ def save(root: Path, instance: str, data: dict[str, Any]) -> None:
 #: Um lock mais velho do que isto é de um processo que morreu a meio: é ignorado.
 LOCK_STALE_SECONDS = 120
 LOCK_WAIT_SECONDS = 30
+_WINDOWS = os.name == "nt"
 
 
 @contextlib.contextmanager
@@ -76,9 +77,14 @@ def locked(root: Path, instance: str) -> Iterator[None]:
     cliente MCP. Sem isto, as duas liam o estado, alteravam-no e gravavam, e a
     última apagava o que a outra acabara de registar. O lock só envolve a
     leitura e a gravação finais (segundos), nunca a sincronização inteira, e é
-    um ficheiro criado com `O_EXCL`, o que funciona igual em Linux, macOS e
-    Windows. Se não for possível obtê-lo em `LOCK_WAIT_SECONDS`, segue sem ele:
-    perder um registo obriga, no pior caso, a descarregar um ficheiro outra vez.
+    um ficheiro criado com `O_EXCL`, o que funciona em Linux, macOS e Windows.
+    Se não for possível obtê-lo em `LOCK_WAIT_SECONDS`, segue sem ele: perder um
+    registo obriga, no pior caso, a descarregar um ficheiro outra vez.
+
+    No Windows, criar o ficheiro no instante em que o dono do lock o está a
+    apagar dá `PermissionError` e não `FileExistsError` (o nome só desaparece
+    quando o último handle fecha). Isso é contenção, não falta de permissões:
+    tratá-lo como erro definitivo fazia seguir sem lock e perder uma escrita.
     """
     path = state_file(root, instance).with_suffix(".lock")
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -91,21 +97,43 @@ def locked(root: Path, instance: str) -> Iterator[None]:
             break
         except FileExistsError:
             try:
-                if time.time() - path.stat().st_mtime > LOCK_STALE_SECONDS:
-                    path.unlink(missing_ok=True)
-                    continue
+                stale = time.time() - path.stat().st_mtime > LOCK_STALE_SECONDS
+            except FileNotFoundError:
+                continue  # o dono acabou de o largar: tenta já
             except OSError:
+                stale = False
+            if stale:
+                with contextlib.suppress(OSError):
+                    path.unlink()
                 continue
-            if time.monotonic() > deadline:
-                break
-            time.sleep(0.1)
+        except PermissionError:
+            if not _WINDOWS:
+                break  # em POSIX é mesmo falta de permissões na pasta
         except OSError:
             break
+        if time.monotonic() > deadline:
+            break
+        time.sleep(0.05)
     try:
         yield
     finally:
         if acquired:
+            _release(path)
+
+
+def _release(path: Path) -> None:
+    """Apaga o ficheiro de lock, insistindo enquanto o Windows o der como em uso.
+
+    Outro processo a ver se o lock está abandonado (`stat`) mantém um handle
+    aberto por instantes; um `unlink` nesse momento falha com `PermissionError`.
+    Desistir deixava o lock preso até ficar abandonado (`LOCK_STALE_SECONDS`).
+    """
+    for _ in range(100):
+        try:
             path.unlink(missing_ok=True)
+            return
+        except PermissionError:
+            time.sleep(0.01)
 
 
 def file_key(fileurl: str) -> str:

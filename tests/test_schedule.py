@@ -193,3 +193,59 @@ def test_lock_gives_up_instead_of_hanging(vault, monkeypatch):
     with state.locked(vault, "test"):
         pass
     assert lock.exists()  # o lock de outro processo não é apagado
+
+
+def _flaky_os_open(monkeypatch, failures):
+    """`os.open` que falha `failures` vezes com PermissionError antes de funcionar."""
+    real_open = state.os.open
+    calls = {"n": 0}
+
+    def fake_open(path, flags, mode=0o777):
+        calls["n"] += 1
+        if calls["n"] <= failures:
+            raise PermissionError(13, "Access is denied", str(path))
+        return real_open(path, flags, mode)
+
+    monkeypatch.setattr(state.os, "open", fake_open)
+    return calls
+
+
+def test_permission_error_on_windows_is_contention_not_a_reason_to_skip_the_lock(vault, monkeypatch):
+    # No Windows, criar o lock enquanto o dono o apaga dá PermissionError. Seguir
+    # sem lock nesse caso perdia escritas (falhou assim no CI, windows-latest).
+    monkeypatch.setattr(state, "_WINDOWS", True)
+    calls = _flaky_os_open(monkeypatch, failures=3)
+    lock = state.state_file(vault, "test").with_suffix(".lock")
+    with state.locked(vault, "test"):
+        assert lock.exists()  # obtido, não ignorado
+    assert calls["n"] == 4
+    assert not lock.exists()
+
+
+def test_permission_error_on_posix_still_gives_up_at_once(vault, monkeypatch):
+    # Em POSIX é falta de permissões na pasta: esperar 30 s não ia resolver nada.
+    monkeypatch.setattr(state, "_WINDOWS", False)
+    calls = _flaky_os_open(monkeypatch, failures=1_000)
+    started = time.monotonic()
+    with state.locked(vault, "test"):
+        pass
+    assert calls["n"] == 1
+    assert time.monotonic() - started < 1
+
+
+def test_release_retries_while_the_lock_file_is_in_use(vault, monkeypatch):
+    lock = state.state_file(vault, "test").with_suffix(".lock")
+    real_unlink = type(lock).unlink
+    calls = {"n": 0}
+
+    def busy_unlink(self, missing_ok=False):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise PermissionError(13, "The process cannot access the file", str(self))
+        return real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(type(lock), "unlink", busy_unlink)
+    with state.locked(vault, "test"):
+        pass
+    assert calls["n"] == 3
+    assert not lock.exists()
