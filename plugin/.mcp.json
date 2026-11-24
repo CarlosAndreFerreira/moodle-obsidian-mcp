@@ -3,7 +3,7 @@
     "moodle": {
       "command": "uvx",
       "args": [
-        "moodle-obsidian-mcp==0.8.5"
+        "moodle-obsidian-mcp==0.8.6"
       ],
       "env": {
         "CLAUDE_PLUGIN_OPTION_VAULT_DIR": "${user_config.vault_dir}",

@@ -19,6 +19,7 @@ Arranque: `moodle-mcp` (ver `main`), `python -m moodle_mcp.server`, ou o shim
 
 import argparse
 import functools
+import glob
 import hashlib
 import json
 import logging
@@ -1038,6 +1039,71 @@ def _not_someone_elses(target: Path, file_url: str, files: dict[str, Any], root:
     return _free_path(target)
 
 
+def _adopt_legacy(
+    dest: Path,
+    file_url: str,
+    item: dict[str, Any],
+    files: dict[str, Any],
+    root: Path,
+    *,
+    page_title: str | None = None,
+) -> bool:
+    """Regista como deste URL um material que uma versão antiga já descarregou para `dest`.
+
+    Antes da 0.8.0 não havia estado, e os materiais descarregados então não têm
+    registo. Sem isto, a regra de nunca substituir o que não é deste URL tratava
+    cada um como do estudante e gravava uma segunda cópia ao lado (`aula (2).pdf`).
+    Um ficheiro só é reconhecido se tiver exatamente o tamanho que o Moodle indica;
+    uma nota de página, se começar pelo título que o servidor escreve ou já tiver o
+    bloco gerido. Na dúvida, não reconhece, e a cópia vai para o lado.
+
+    Returns:
+        True se o material foi registado: um ficheiro fica igual e não é descarregado
+        outra vez; uma nota de página é atualizada no mesmo sítio, sem cópia ao lado.
+    """
+    if files.get(state.file_key(file_url)) is not None:
+        return False
+    try:
+        if page_title is None:
+            expected = int(item.get("filesize") or 0)
+            if expected <= 0:
+                return False
+            # As versões antigas numeravam por outra ordem os ficheiros com o mesmo nome
+            # (`image.png`, `image (2).png`...): procura também entre as cópias numeradas
+            # da mesma pasta, desde que ainda não sejam de outro URL.
+            owned = {
+                (root / path).resolve()
+                for entry in files.values()
+                if isinstance(entry, dict)
+                for path in state.known_paths(entry)
+            }
+            base = re.sub(r" \(\d+\)$", "", dest.stem)  # `image (3)` -> `image`
+            original = dest.with_name(f"{base}{dest.suffix}")
+            numbered = sorted(dest.parent.glob(f"{glob.escape(base)} (*){glob.escape(dest.suffix)}"))
+            for candidate in dict.fromkeys([dest, original, *numbered]):
+                if candidate.resolve() in owned or not candidate.is_file():
+                    continue
+                if candidate.stat().st_size == expected:
+                    state.remember(files, file_url, item, candidate, root)
+                    return True
+            return False
+        else:
+            if not dest.is_file():
+                return False
+            with dest.open(encoding="utf-8", errors="replace") as handle:
+                head = handle.read(4096)
+            first = head.lstrip("\ufeff").splitlines()[0].strip() if head.strip() else ""
+            ours = first == f"# {page_title}" or "moodle-mcp:start" in head
+    except (OSError, ValueError, TypeError):
+        return False
+    if ours:
+        # Uma nota de página é reescrita no mesmo sítio (é uma nota com bloco gerido:
+        # o texto do estudante fica, e uma nota antiga vai primeiro para o backup);
+        # sem `timemodified`, o registo não conta como «igual» e o conteúdo é atualizado.
+        state.remember(files, file_url, item if page_title is None else {}, dest, root)
+    return ours
+
+
 def _course_target(dest: Path, file_url: str, files: dict[str, Any], root: Path, used: set[Path]) -> Path:
     """Destino de um material da UC numa sincronização, sem nunca cair em cima de algo alheio.
 
@@ -1047,11 +1113,14 @@ def _course_target(dest: Path, file_url: str, files: dict[str, Any], root: Path,
     um caminho na mesma pasta e ainda não usado nesta sincronização.
     """
     known = _known_paths(files, file_url, root)
-    if dest.exists() and dest.resolve() not in known:
+    # Também quando `dest` ainda não existe: a numeração dos nomes repetidos pode mudar
+    # entre sincronizações, e o mesmo URL já guardado nesta pasta não deve ganhar outra cópia.
+    if dest.resolve() not in known:
         taken = {path.resolve() for path in used}
         folder = dest.parent.resolve()
         for previous in reversed(known):
             if previous.parent == folder and previous not in taken and previous.exists():
+                used.discard(dest)  # o nome reservado por `unique_path` fica livre para outro material
                 used.add(previous)
                 return previous
     chosen = _not_someone_elses(dest, file_url, files, root)
@@ -1225,6 +1294,9 @@ def download_course_materials(
                         dest = vault.unique_path(sec_dir / f"{vault.safe_filename(stem)}.md", used)
                     else:
                         dest = vault.unique_path(sec_dir / vault.neutral_download_name(fname), used)
+                    _adopt_legacy(
+                        dest, furl, content_item, files, root, page_title=mname if is_page else None
+                    )
                     dest = _course_target(dest, furl, files, root, used)
                     if state.is_unchanged(files, furl, content_item, dest):
                         skipped.append(str(dest))
@@ -1259,6 +1331,7 @@ def download_course_materials(
                                 / vault.neutral_download_name(vault.safe_filename(f"{aname}_{fname}")),
                                 used,
                             )
+                            _adopt_legacy(dest, furl, att, files, root)
                             dest = _course_target(dest, furl, files, root, used)
                             if state.is_unchanged(files, furl, att, dest):
                                 skipped.append(str(dest))
