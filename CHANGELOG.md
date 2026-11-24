@@ -7,6 +7,18 @@ o projeto segue [versionamento semântico](https://semver.org/lang/pt/) (antes d
 ## [0.8.4] — 2026-11-24
 
 ### Corrigido
+- **Lock do estado ignorado no Windows sob contenção.** Criar o ficheiro de
+  lock no instante em que o dono o está a apagar dá `PermissionError` no
+  Windows (o nome só desaparece quando o último handle fecha), e o
+  `state.locked` tratava isso como erro definitivo e seguia sem lock: uma
+  sincronização agendada e outra pedida no cliente podiam perder um registo do
+  estado uma da outra. Num teste com 4 threads a criar e apagar o mesmo
+  ficheiro, cerca de 5% das tentativas davam `PermissionError`. Passa a contar
+  como contenção (espera e tenta de novo, até `LOCK_WAIT_SECONDS`); em POSIX
+  continua a desistir logo. Libertar o lock também insiste enquanto o Windows
+  der o ficheiro como em uso, em vez de o deixar preso até ficar abandonado.
+  Apareceu como falha intermitente de `test_lock_serialises_read_modify_write`
+  no CI (`windows-latest`).
 - **`get_recent_changes` declarava `openWorldHint=True`.** A ferramenta não faz
   pedidos ao Moodle: lê o resultado guardado no Vault pela última
   sincronização. Passa a declarar `openWorldHint=False`. Era a única hint que
