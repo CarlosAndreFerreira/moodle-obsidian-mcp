@@ -1039,6 +1039,64 @@ def _not_someone_elses(target: Path, file_url: str, files: dict[str, Any], root:
     return _free_path(target)
 
 
+def _book_chapters(mod: dict[str, Any]) -> dict[str, tuple[str, str]]:
+    """Capítulos de um livro (`mod_book`): id do capítulo -> (número, título).
+
+    O Moodle envia a estrutura do livro num item `structure` (JSON com `title`,
+    `href` = `<id>/index.html` e `subitems`), e cada capítulo como um
+    `index.html` na pasta `/<id>/`. Os capítulos são numerados pela ordem do livro
+    (`01`, `02`…) e os subcapítulos com o número do capítulo (`03.1`), para as
+    notas ficarem ordenadas no Obsidian. Uma estrutura ilegível dá `{}`, e os
+    capítulos ficam com o nome do livro, como antes.
+    """
+    item = next((c for c in mod.get("contents", []) if c.get("filename") == "structure"), None)
+    try:
+        tree = json.loads((item or {}).get("content") or "[]")
+    except (TypeError, ValueError):
+        return {}
+    found: dict[str, tuple[str, str]] = {}
+
+    def walk(nodes: Any, prefix: str) -> None:
+        for position, node in enumerate(nodes if isinstance(nodes, list) else [], start=1):
+            if not isinstance(node, dict):
+                continue
+            number = f"{prefix}.{position}" if prefix else f"{position:02d}"
+            chapter_id = str(node.get("href") or "").split("/")[0]
+            title = sanitize.strip_invisible(str(node.get("title") or "")).strip()
+            if chapter_id and title:
+                found[chapter_id] = (number, title)
+            walk(node.get("subitems"), number)
+
+    walk(tree, "")
+    return found
+
+
+def _move_known_note(dest: Path, file_url: str, files: dict[str, Any], root: Path, within: Path) -> None:
+    """Move para `dest` a nota que este URL já tinha noutro sítio (p.ex. um capítulo com o nome antigo).
+
+    Mantém o que o estudante lá escreveu, em vez de deixar uma cópia órfã com o
+    nome antigo. Só move uma nota `.md` registada para este URL e dentro de
+    `within` (a pasta de materiais da UC), e só se `dest` ainda não existir.
+    """
+    if dest.exists():
+        return
+    for old in _known_paths(files, file_url, root):
+        if (
+            old != dest.resolve()
+            and old.suffix == ".md"
+            and old.is_file()
+            and old.is_relative_to(within.resolve())
+        ):
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            old.replace(dest)
+            entry = files.get(state.file_key(file_url))
+            if isinstance(entry, dict):
+                kept = [p for p in state.known_paths(entry) if (root / p).resolve() != old]
+                where = dest.relative_to(root).as_posix()
+                entry.update(path=where, paths=[*kept, where])
+            return
+
+
 def _adopt_legacy(
     dest: Path,
     file_url: str,
@@ -1282,20 +1340,30 @@ def download_course_materials(
         sec_dir = base_uc_dir / sec_name
         for mod in section.get("modules", []):
             mname = vault.safe_filename(mod.get("name", "Recurso"))
+            chapters = _book_chapters(mod) if mod.get("modname") == "book" else {}
             for content_item in mod.get("contents", []):
                 ctype = content_item.get("type")
                 fname = vault.safe_filename(content_item.get("filename") or f"{mname}.bin")
                 furl = content_item.get("fileurl")
                 if ctype == "file" and furl:
                     is_page = fname.lower().endswith((".html", ".htm"))
-                    if is_page:
+                    title = mname
+                    chapter = chapters.get(str(content_item.get("filepath") or "").strip("/").split("/")[0])
+                    if is_page and chapter:
+                        # Capítulo de um livro: todos se chamam `index.html`; ficam numa pasta do
+                        # livro, pela ordem do livro e com o título do capítulo.
+                        number, title = chapter
+                        name = vault.safe_filename(f"{number} {title}")
+                        dest = vault.unique_path(sec_dir / mname / f"{name}.md", used)
+                        _move_known_note(dest, furl, files, root, base_uc_dir)
+                    elif is_page:
                         # Cada página do Moodle chama-se `index.html`: o nome útil é o do módulo.
                         stem = mname if Path(fname).stem.lower() == "index" else Path(fname).stem
                         dest = vault.unique_path(sec_dir / f"{vault.safe_filename(stem)}.md", used)
                     else:
                         dest = vault.unique_path(sec_dir / vault.neutral_download_name(fname), used)
                     _adopt_legacy(
-                        dest, furl, content_item, files, root, page_title=mname if is_page else None
+                        dest, furl, content_item, files, root, page_title=title if is_page else None
                     )
                     dest = _course_target(dest, furl, files, root, used)
                     if state.is_unchanged(files, furl, content_item, dest):
@@ -1304,8 +1372,11 @@ def download_course_materials(
                     try:
                         if is_page:
                             r = transport.authed_get(furl, instance, timeout=30)
-                            sec_dir.mkdir(parents=True, exist_ok=True)
-                            vault.write_managed_note(dest, f"# {mname}\n\n{vault.html_to_markdown(r.text)}\n")
+                            dest.parent.mkdir(parents=True, exist_ok=True)
+                            book = f"*{mname}*\n\n" if title != mname else ""
+                            vault.write_managed_note(
+                                dest, f"# {title}\n\n{book}{vault.html_to_markdown(r.text)}\n"
+                            )
                             downloaded.append(str(dest))
                         else:
                             res = _save_moodle_file(furl, dest, extract_pdfs, instance)

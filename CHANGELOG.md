@@ -4,6 +4,22 @@ Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-PT/1.1.0/);
 o projeto segue [versionamento semântico](https://semver.org/lang/pt/) (antes da
 1.0, uma versão menor pode mudar comportamento).
 
+## [0.8.7] — 2026-11-24
+
+### Alterado
+- **Capítulos dos livros do Moodle com o nome do capítulo.** Cada capítulo de um
+  livro (`mod_book`) chega como um `index.html`, e as notas ficavam todas com o
+  nome do livro: `Contrato de Aprendizagem (2).md` … `(11).md`. Passam a ficar
+  numa pasta com o nome do livro, numeradas pela ordem do livro e com o título
+  de cada capítulo (`Contrato de Aprendizagem/02 Objetivos.md`; subcapítulos
+  como `03.1 …`), e a nota começa pelo título do capítulo e pelo nome do livro.
+  Os títulos e a ordem vêm do item `structure` que o Moodle envia com o livro;
+  se não for legível, os capítulos ficam com os nomes de antes.
+- Uma nota de capítulo que o servidor já tinha registado com o nome antigo é
+  movida para o nome novo, com o que o estudante lá escreveu, em vez de ficar
+  uma cópia órfã. As imagens dos capítulos ficam onde sempre ficaram, para não
+  duplicar os materiais já descarregados.
+
 ## [0.8.6] — 2026-11-24
 
 ### Corrigido
@@ -368,6 +384,7 @@ o projeto segue [versionamento semântico](https://semver.org/lang/pt/) (antes d
 - `set_moodle_token` valida antes de gravar e não muda o URL de uma instância.
 - As ferramentas que gravam credenciais (`auth`) ficam desligadas por omissão.
 
+[0.8.7]: https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp/compare/v0.8.6...v0.8.7
 [0.8.6]: https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp/compare/v0.8.5...v0.8.6
 [0.8.5]: https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp/compare/v0.8.4...v0.8.5
 [0.8.4]: https://github.com/CarlosAndreFerreira/moodle-obsidian-mcp/compare/v0.8.3...v0.8.4
